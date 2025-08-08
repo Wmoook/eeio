@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EEO Physics + Smiley (.io clone)</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #111; color: #eee; font-family: system-ui, Arial, sans-serif; }
+      #hud { position: fixed; top: 8px; left: 8px; z-index: 9999; pointer-events: auto; background: rgba(0,0,0,.4); padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.4; }
+      #canvas { display: block; margin: 0 auto; background: #000; image-rendering: pixelated; }
+      .k { color: #9cf; }
+      .v { color: #ffb400; }
+      .row { margin-top: 4px; }
+      .badge { display: inline-block; padding: 2px 6px; border-radius: 10px; font-weight: 600; margin-right: 6px; cursor: pointer; user-select: none; }
+      .on { background: #1f8a36; color: #fff; }
+      .off { background: #444; color: #bbb; }
+      #left-tools { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; gap: 6px; }
+      #left-tools .tool { background: rgba(0,0,0,.5); color: #eee; border: 1px solid #555; border-radius: 6px; padding: 6px 8px; cursor: pointer; user-select: none; text-align: center; }
+      #left-tools .tool:hover { background: rgba(255,255,255,.08); }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div><b>Controls</b></div>
+      <div>Move: <span class="k">Arrow keys</span> | Jump: <span class="k">Space</span></div>
+      <div>Flip gravity: <span class="k">Q/E</span> | Reset: <span class="k">R</span></div>
+      <div>Toggle low gravity: <span class="k">L</span> | Multi-jump: <span class="k">[ / ]</span></div>
+      <div>Change smiley: <span class="k">1-9</span></div>
+      <div>FPS: <span id="fps" class="v">--</span> | Frame ms: <span id="ms" class="v">--</span></div>
+      <div id="worldInfo">Tiles: --</div>
+      <div class="row">
+        <span id="godBadge" class="badge off" title="Toggle with G">God: OFF</span>
+        <span id="editBadge" class="badge off" title="Toggle with G">Edit: OFF</span>
+        <span id="fsBadge" class="badge off" title="Toggle Fullscreen">Fullscreen</span>
+      </div>
+      <div id="inspect" class="row"></div>
+      <div>Gravity dir: <span id="gdir" class="v">down</span> | Jumps: <span id="jinfo" class="v">1</span></div>
+    </div>
+    <canvas id="canvas" width="640" height="500"></canvas>
+    <!-- Top-right coin HUD -->
+    <div id="coinHud" style="position: fixed; top: 8px; right: 8px; z-index: 9999; pointer-events: none; background: rgba(0,0,0,.4); padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.4;">
+      <div>Gold Coins: <span id="goldCount" class="v">0</span></div>
+      <div>Blue Coins: <span id="blueCount" class="v">0</span></div>
+    </div>
+    <div id="left-tools">
+      <div id="resetView" class="tool" title="Reset camera to default view">Reset View</div>
+      <div id="togglePalette" class="tool" title="Toggle block palette (God/Edit)">Palette</div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+    <script type="module">
+      import { Atlases, resolveSpriteForId, buildItemMap, getAllItems } from './items.js';
+      import { EEBlocksIds } from './eeblocks_ids.js';
+      import { GeneratedItemMap } from './items_map.js';
+      const atlasImgs = {};
+      for (const k in Atlases) { const img = new Image(); img.src = Atlases[k].imgPath; atlasImgs[k] = img; }
+      // Build item map once images begin loading (cols can be refined after onload, but offsets are stable)
+      buildItemMap(atlasImgs);
+      // Validate mapping basic invariants for common IDs (dev-only; no throw, just warn)
+      const devChecks = [
+        { id: 100, atlas: 'special' }, // gold coin
+        { id: 101, atlas: 'special' }, // blue coin
+      ];
+      devChecks.forEach(({id, atlas}) => {
+        const m = window.ItemMap && window.ItemMap[id];
+        if (m && m.atlasKey !== atlas) console.warn('Mapping atlas mismatch for id', id, 'got', m.atlasKey, 'expected', atlas);
+      });
+      // Precompute IDs that live on 'above' layer to draw in overlay cheaply
+      const aboveIds = new Set(getAllItems().filter(i => i.layer === 'above').map(i => i.id));
+      window.EE_AboveIds = aboveIds;
+      // Expose a markDirtyTile helper for cache invalidation on edits/collections
+      window.markDirtyTile = function(x, y){
+        if (!window.tileCacheDirty) window.tileCacheDirty = new Set();
+        window.tileCacheDirty.add(`${x},${y}`);
+      };
+
+      // SFX: EE coin pickup. Try file from ./sfx/, else synth fallback
+      let audioCtx = null;
+      function getAudioCtx(){
+        if (!audioCtx) {
+          try { audioCtx = new (window.AudioContext||window.webkitAudioContext)(); } catch(e){}
+        }
+        return audioCtx;
+      }
+      // Unlock audio on first interaction
+      const unlock = ()=>{ const ac = getAudioCtx(); if (ac && ac.state === 'suspended') ac.resume(); window.removeEventListener('mousedown', unlock); window.removeEventListener('keydown', unlock); };
+      window.addEventListener('mousedown', unlock, { once: true });
+      window.addEventListener('keydown', unlock, { once: true });
+      const coinTry = [ './sfx/coin.mp3', './sfx/coin.ogg', './sfx/coin.wav', './EEBlocks/Sounds/misc/Coin.mp3' ];
+      let coinAudioEl = null;
+      for (const url of coinTry) {
+        const el = new Audio(); el.preload = 'auto'; el.src = url;
+        // pick the first that can play
+        if (el.canPlayType && el.canPlayType('audio/mpeg') || el.canPlayType('audio/ogg') || el.canPlayType('audio/wav')) {
+          coinAudioEl = el; break;
+        }
+      }
+      window.playCoinSfx = function(){
+        if (coinAudioEl) {
+          try { const el = coinAudioEl.cloneNode(); el.play(); return; } catch(e){}
+        }
+        const ac = getAudioCtx();
+        if (!ac) return;
+        const o = ac.createOscillator();
+        const g = ac.createGain();
+        o.type = 'triangle';
+        const now = ac.currentTime;
+        o.frequency.setValueAtTime(880, now);
+        o.frequency.exponentialRampToValueAtTime(1320, now + 0.08);
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.2, now + 0.005);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        o.connect(g); g.connect(ac.destination);
+        o.start(now); o.stop(now + 0.13);
+      };
+      window.EE_DrawTile = function(ctx, tx, ty){
+        if (!window.fgMap) return;
+        const drawLayer = (id) => {
+          if (!id) return;
+          // ensure no stale filters
+          ctx.filter = 'none';
+          // Invisible action tiles: draw ONLY when player overlaps the tile
+          const invIds = new Set([411,412,413,1519,414,460]);
+          if (invIds.has(id) && window.state && window.state.p) {
+            const px = window.state.p.x, py = window.state.p.y;
+            const rx = tx*16, ry = ty*16;
+            const overlap = !(px+15 < rx || py+15 < ry || px > rx+15 || py > ry+15);
+            if (!overlap) return;
+          }
+          // Coins: skip drawing into cache (no static coin in cached bitmap)
+          const isCoinCheck = (id === 100 || id === 101 || id === 110 || id === 111);
+          if (window.EE_CacheBuild && isCoinCheck) {
+            return;
+          }
+          // Animate coins using blocks_special frame ranges in overlay
+          if (!window.EE_CacheBuild) {
+            if (isCoinCheck) {
+              const atlasImg = atlasImgs['special'];
+              if (!atlasImg || atlasImg.width === 0) { atlasImg && atlasImg.addEventListener('load', ()=>{}); return; }
+              const cols = Math.max(1, Math.floor(atlasImg.width / 16));
+              const t = (window.EE_time || performance.now());
+              const frames = 13; // per your mapping
+              const frame = Math.floor((t / 90) % frames); // ~90ms per frame like EE aura
+              let base = 0;
+              if (id === 100) base = 0;     // gold uncollected 0..12
+              else if (id === 101) base = 13; // blue uncollected 13..25
+              else if (id === 110) base = 26; // gold collected 26..38
+              else if (id === 111) base = 39; // blue collected 39..51
+              const art = base + frame;
+              const gx = art % cols;
+              const gy = Math.floor(art / cols);
+              ctx.drawImage(atlasImg, gx*16, gy*16, 16, 16, tx*16, ty*16, 16, 16);
+              return;
+            }
+          }
+          let spr = resolveSpriteForId(id, atlasImgs);
+          let atlasKey = spr?.atlasKey || null;
+          let sx = 0, sy = 0, sz = 18;
+          if (spr && spr.directImg) {
+            // Exact per-ID image from EEBlocks
+            ctx.drawImage(spr.directImg, 0, 0, 16, 16, tx*16, ty*16, 16, 16);
+            return;
+          } else if (spr) {
+            sz = spr.atlas.tileSize;
+            sx = spr.sx * sz; sy = spr.sy * sz;
+          } else {
+            // Debug fallback: draw placeholder colored tile so we can see layout
+            const r = (id * 73) % 255, g = (id * 151) % 255, b = (id * 199) % 255;
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillRect(tx*16, ty*16, 16, 16);
+            return;
+          }
+          const atlasImg = spr.directImg || atlasImgs[atlasKey || 'blocks'];
+          if (!atlasImg || atlasImg.width === 0) {
+            atlasImg && atlasImg.addEventListener('load', ()=>{ window.requestAnimationFrame(()=>{}); });
+            return;
+          }
+          const isBgLayer = window.bgMap && window.bgMap[ty] && window.bgMap[ty][tx] === id;
+          const inset = isBgLayer ? 0.2 : 0.01; // stronger inset for background tiles to avoid bleed
+          const xBias = isBgLayer ? 2 : 0; // shift source 2px left for background tiles
+          const srcX = Math.max(0, sx - xBias + inset);
+          ctx.drawImage(atlasImg, srcX, sy + inset, sz - inset*2, sz - inset*2, tx*16, ty*16, 16, 16);
+        };
+        // background, decoration, then foreground (fg last so it visually wins)
+        drawLayer((window.bgMap?.[ty] && window.bgMap?.[ty][tx]) || 0);
+        drawLayer((window.decoMap?.[ty] && window.decoMap?.[ty][tx]) || 0);
+        drawLayer((window.fgMap[ty] && window.fgMap[ty][tx]) || 0);
+      }
+      // Overlay-only draw: animate coins and draw only 'above' layer items
+      window.EE_DrawOverlay = function(ctx, tx, ty){
+        if (!window.fgMap) return;
+        ctx.filter = 'none';
+        const idBg = (window.bgMap?.[ty] && window.bgMap?.[ty][tx]) || 0;
+        const idDeco = (window.decoMap?.[ty] && window.decoMap?.[ty][tx]) || 0;
+        const idFg = (window.fgMap?.[ty] && window.fgMap?.[ty][tx]) || 0;
+        const drawStatic = (id)=>{
+          if (!id) return;
+          const spr = resolveSpriteForId(id, atlasImgs);
+          if (!spr) return;
+          if (spr.directImg) {
+            if (!spr.directImg.complete) return;
+            ctx.drawImage(spr.directImg, 0, 0, 16, 16, tx*16, ty*16, 16, 16);
+            return;
+          }
+          const img = atlasImgs[spr.atlasKey];
+          if (!img || !img.complete) return;
+          const sz = spr.atlas.tileSize;
+          const isBgLayer = window.bgMap && window.bgMap[ty] && window.bgMap[ty][tx] === id;
+          const inset = isBgLayer ? 0.2 : 0.01;
+          const xBias = isBgLayer ? 2 : 0;
+          const srcX = Math.max(0, spr.sx*sz - xBias + inset);
+          ctx.drawImage(img, srcX, spr.sy*sz + inset, sz - inset*2, sz - inset*2, tx*16, ty*16, 16, 16);
+        };
+        // Coins animate in overlay; always draw animated coin frame on top
+        {
+          const coins = [100,101,110,111];
+          const coinId = coins.includes(idBg) ? idBg : coins.includes(idDeco) ? idDeco : coins.includes(idFg) ? idFg : 0;
+          if (coinId) {
+            const atlasImg = atlasImgs['special'];
+            if (atlasImg && atlasImg.complete) {
+              const cols = Math.max(1, Math.floor(atlasImg.width / 16));
+              const t = (window.EE_CoinFrame && window.EE_CoinFrame.time) || (window.EE_time || performance.now());
+              const frames = 13;
+              const frame = Math.floor((t / 90) % frames);
+              let base = 0;
+              if (coinId === 100) base = 0;
+              else if (coinId === 101) base = 13;
+              else if (coinId === 110) base = 26;
+              else if (coinId === 111) base = 39;
+              const art = base + frame;
+              const gx = art % cols;
+              const gy = Math.floor(art / cols);
+              ctx.drawImage(atlasImg, gx*16, gy*16, 16, 16, tx*16, ty*16, 16, 16);
+            }
+          }
+        }
+        // Draw any 'above' items statically on top
+        const aboveId = aboveIds.has(idBg) ? idBg : aboveIds.has(idDeco) ? idDeco : aboveIds.has(idFg) ? idFg : 0;
+        // Do not overdraw coins with a static above-layer sprite; ensure filter reset
+        ctx.filter = 'none';
+        if (aboveId && !(aboveId === 100 || aboveId === 101 || aboveId === 110 || aboveId === 111)) {
+          drawStatic(aboveId);
+        }
+      }
+      window.EE_DrawTileFrom = function(ctx, tx, ty, mapRef){
+        if (!mapRef) return;
+        const id = (mapRef[ty] && mapRef[ty][tx]) || 0;
+        if (!id) return;
+        let spr = resolveSpriteForId(id, atlasImgs);
+        let atlasKey = spr?.atlasKey || null;
+        let sx = 0, sy = 0, sz = 18;
+        if (spr && spr.directImg) {
+          if (!spr.directImg.complete) return;
+          ctx.drawImage(spr.directImg, 0, 0, 16, 16, tx*16, ty*16, 16, 16);
+          return;
+        } else if (spr) {
+          sz = spr.atlas.tileSize;
+          sx = spr.sx * sz; sy = spr.sy * sz;
+        } else {
+          const r = (id * 73) % 255, g = (id * 151) % 255, b = (id * 199) % 255;
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(tx*16, ty*16, 16, 16);
+          return;
+        }
+        const atlasImg = spr.directImg || atlasImgs[atlasKey || 'blocks'];
+        if (!atlasImg || atlasImg.width === 0) {
+          atlasImg && atlasImg.addEventListener('load', ()=>{ window.requestAnimationFrame(()=>{}); });
+          return;
+        }
+        const isBgLayer = mapRef === window.bgMap;
+        const inset = isBgLayer ? 0.2 : 0.01;
+        const xBias = isBgLayer ? 2 : 0;
+        const srcX = Math.max(0, sx - xBias + inset);
+        ctx.drawImage(atlasImg, srcX, sy + inset, sz - inset*2, sz - inset*2, tx*16, ty*16, 16, 16);
+      }
+
+      // Simple block palette UI for God/Edit mode
+      const paletteBtn = document.getElementById('togglePalette');
+      let paletteOpen = false;
+      let paletteEl;
+      let paletteGrid;
+      let paletteTabs;
+      let layerSelect;
+      let currentCategory = 'all';
+      const categories = ['all', ...Object.keys(Atlases), 'special'];
+      function drawCell(c2, id) {
+        c2.clearRect(0,0,16,16);
+        const spr = resolveSpriteForId(id, atlasImgs);
+        if (spr) {
+          c2.imageSmoothingEnabled = false;
+          if (spr.directImg) {
+            if (spr.directImg.complete) {
+              c2.drawImage(spr.directImg, 0, 0, 16, 16, 0, 0, 16, 16);
+              return;
+            }
+          } else {
+            const img = atlasImgs[spr.atlasKey];
+            const sz = spr.atlas.tileSize;
+            if (img && img.complete) {
+              c2.drawImage(img, spr.sx*sz, spr.sy*sz, sz, sz, 0, 0, 16, 16);
+              return;
+            }
+          }
+        }
+        const r = (id * 73) % 255, g = (id * 151) % 255, b = (id * 199) % 255;
+        c2.fillStyle = `rgb(${r},${g},${b})`;
+        c2.fillRect(0, 0, 16, 16);
+      }
+      function rebuildGrid() {
+        if (!paletteGrid) return;
+        paletteGrid.innerHTML = '';
+        // Merge EE Offline mapping with any EEBlocks-only IDs not present
+        const mapped = new Map(getAllItems().map(it => [it.id, it]));
+        for (const ent of EEBlocksIds) { if (!mapped.has(ent.id)) mapped.set(ent.id, { id: ent.id, layer: 'foreground', atlasKey: 'blocks', artoffset: ent.id }); }
+        const items = Array.from(mapped.values()).sort((a,b)=>a.id-b.id);
+        items.forEach(it => {
+          const cell = document.createElement('canvas');
+          cell.width = 16; cell.height = 16; cell.style.width = '20px'; cell.style.height = '20px';
+          cell.style.border = '1px solid #333';
+          cell.style.borderRadius = '2px';
+          const c2 = cell.getContext('2d');
+          drawCell(c2, it.id);
+          cell.title = `${it.id} (${it.atlasKey})`;
+          cell.style.cursor = 'pointer';
+          cell.addEventListener('click', () => { window.currentBrushId = it.id; [...paletteGrid.children].forEach(ch=>ch.style.outline='none'); cell.style.outline='2px solid #6cf'; });
+          paletteGrid.appendChild(cell);
+        });
+      }
+      function ensurePalette() {
+        if (paletteEl) return paletteEl;
+        paletteEl = document.createElement('div');
+        paletteEl.style.position = 'absolute';
+        paletteEl.style.right = '8px';
+        paletteEl.style.top = '8px';
+        paletteEl.style.zIndex = '4';
+        paletteEl.style.background = 'rgba(0,0,0,0.8)';
+        paletteEl.style.border = '1px solid #444';
+        paletteEl.style.borderRadius = '8px';
+        paletteEl.style.padding = '8px';
+        paletteEl.style.maxHeight = '70vh';
+        paletteEl.style.width = '280px';
+        paletteEl.style.overflow = 'auto';
+        document.body.appendChild(paletteEl);
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.gap = '6px';
+        header.style.flexWrap = 'wrap';
+        categories.forEach(cat => {
+          const tab = document.createElement('button');
+          tab.textContent = cat;
+          tab.style.background = '#333';
+          tab.style.color = '#eee';
+          tab.style.border = '1px solid #555';
+          tab.style.borderRadius = '6px';
+          tab.style.padding = '4px 6px';
+          tab.style.cursor = 'pointer';
+          tab.addEventListener('click', () => { currentCategory = cat; rebuildGrid(); });
+          header.appendChild(tab);
+        });
+        paletteEl.appendChild(header);
+        const layerRow = document.createElement('div');
+        layerRow.style.margin = '6px 0';
+        layerRow.style.color = '#ccc';
+        layerRow.textContent = 'Place on: ';
+        layerSelect = document.createElement('select');
+        ['auto','foreground','decoration','background'].forEach(opt => { const o = document.createElement('option'); o.value = opt; o.textContent = opt; layerSelect.appendChild(o); });
+        layerRow.appendChild(layerSelect);
+        paletteEl.appendChild(layerRow);
+        // expose selector so main.js can read it during placement
+        window.layerSelect = layerSelect;
+        paletteGrid = document.createElement('div');
+        paletteGrid.style.display = 'grid';
+        paletteGrid.style.gridTemplateColumns = 'repeat(10, 20px)';
+        paletteGrid.style.gap = '4px';
+        paletteEl.appendChild(paletteGrid);
+        // draw now and on image loads
+        rebuildGrid();
+        for (const k in atlasImgs) { atlasImgs[k].addEventListener('load', rebuildGrid, { once: true }); }
+        return paletteEl;
+      }
+      if (paletteBtn) paletteBtn.addEventListener('click', () => {
+        const el = ensurePalette();
+        paletteOpen = !paletteOpen;
+        el.style.display = paletteOpen ? 'block' : 'none';
+      });
+
+      // Allow toggling edit/god from HUD badges as well
+      const godBadge = document.getElementById('godBadge');
+      if (godBadge) godBadge.addEventListener('click', () => { window.state.godMode = !window.state.godMode; window.state.canEdit = window.state.godMode; });
+      const editBadge = document.getElementById('editBadge');
+      if (editBadge) editBadge.addEventListener('click', () => { window.state.canEdit = !window.state.canEdit; });
+    </script>
+    <script src="main.js"></script>
+  </body>
+  </html>
+
+
