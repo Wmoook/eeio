@@ -768,8 +768,25 @@ function copyShiftRegionToWorld(srcFg, srcBg, srcDeco, srcX0, srcY0, dstX0, dstY
 async function loadShiftDBOnce() {
   if (shift.dbBytes && shift.dbMaps) return;
   try {
-    const url = './EX%20Shift%20DB1%20-nou%281%29.eelvl';
-    const buf = await fetch(url).then(r => r.arrayBuffer());
+    async function fetchFirst(urls){
+      let lastErr;
+      for (const u of urls){
+        try {
+          const res = await fetch(u);
+          if (res.ok) return await res.arrayBuffer();
+        } catch (e) { lastErr = e; }
+      }
+      if (lastErr) throw lastErr; else throw new Error('No DB file found');
+    }
+    const candidates = [
+      './EX Shift DB1 -nou(1).eelvl',
+      './EX Shift DB1 - nou(1).eelvl',
+      './EX Shift MDB1 - nou(1).eelvl',
+      './EX%20Shift%20DB1%20-nou%281%29.eelvl',
+      './EX%20Shift%20DB1%20-%20nou%281%29.eelvl',
+      './EX%20Shift%20MDB1%20-%20nou%281%29.eelvl'
+    ];
+    const buf = await fetchFirst(candidates);
     shift.dbBytes = new Uint8Array(buf);
     // Parse DB once into temporary world, snapshot maps, then restore current world
     const saved = { fg: fgMap, bg: bgMap, deco: decoMap, W: WORLD_W, H: WORLD_H, solid: new Set(solid) };
@@ -798,8 +815,28 @@ function placeShiftBox(levelIndex, boxIndex) {
   const srcFg = shift.dbMaps.fg, srcBg = shift.dbMaps.bg, srcDeco = shift.dbMaps.deco;
   // Compute source rect (1-based in spec). Convert to 0-based indices
   const w = shift.boxW, h = shift.boxH;
-  const sx0 = (boxIndex - 1) * w; // zero-based
-  const sy0 = (levelIndex - 1) * h; // zero-based
+  let sx0 = (boxIndex - 1) * w; // assume zero-based data
+  let sy0 = (levelIndex - 1) * h; // assume zero-based data
+  // Heuristic: if region appears empty, try +1 offset to handle 1-based DB coordinates
+  const regionHasAny = (x0, y0) => {
+    let nonzero = 0;
+    for (let dy = 0; dy < h && nonzero < 4; dy++) {
+      const yy = y0 + dy; if (!srcFg[yy] && !srcBg[yy] && !srcDeco[yy]) continue;
+      for (let dx = 0; dx < w && nonzero < 4; dx++) {
+        const xx = x0 + dx;
+        const f = (srcFg[yy] && srcFg[yy][xx]) || 0;
+        const b = (srcBg[yy] && srcBg[yy][xx]) || 0;
+        const d = (srcDeco[yy] && srcDeco[yy][xx]) || 0;
+        if (f|b|d) nonzero++;
+      }
+    }
+    return nonzero > 0;
+  };
+  if (!regionHasAny(sx0, sy0)) {
+    if (regionHasAny(sx0 + 1, sy0 + 1)) { sx0 += 1; sy0 += 1; }
+    else if (regionHasAny(sx0 + 1, sy0)) { sx0 += 1; }
+    else if (regionHasAny(sx0, sy0 + 1)) { sy0 += 1; }
+  }
   // Copy region into destination box
   copyShiftRegionToWorld(srcFg, srcBg, srcDeco, sx0, sy0, shift.dst.x0, shift.dst.y0, w, h);
   // Mark cache dirty
@@ -1308,7 +1345,10 @@ function loop() {
   last = now - acc;
   // SHIFT: rotate box every interval for testing
   if (shift.enabled) {
-    if (!shift.lastSwap) { shift.lastSwap = now; loadShiftDBOnce().then(()=>placeShiftBox(1,1)); }
+    if (!shift.lastSwap) {
+      shift.lastSwap = now;
+      loadShiftDBOnce().then(()=>{ placeShiftBox(1,1); }).catch(()=>{});
+    }
     if (now - shift.lastSwap > shift.intervalMs && !shift.swapping) {
       shift.swapping = true;
       const nextBox = ((shift.curBox) % 12) + 1; // 1..12
