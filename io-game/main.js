@@ -427,7 +427,7 @@ function isBlockingAt(tx, ty) {
 function getDoorGateBlocking(id) {
   // Returns true if this decoration id should block the player
   // Red/Green/Blue
-  if (id === 23) return !isKeyActive('red'); // door red blocks when key inactive
+  if (id === 23) return !isKeyActive('red');
   if (id === 24) return !isKeyActive('green');
   if (id === 25) return !isKeyActive('blue');
   if (id === 26) return isKeyActive('red'); // gate blocks when key active
@@ -946,6 +946,34 @@ function parseEELVL_DB(bytes, forcedW = 400, forcedH = 200) {
   return { fg, bg, deco, W, H, placed };
 }
 
+// Simple name entry UI (runs once)
+// Delay name UI until DOM is ready and ensure state exists
+setTimeout(()=>{
+  window.state = window.state || {};
+  try { const saved = localStorage.getItem('EE_PlayerName'); if (saved) { state.playerName = saved; return; } } catch(_){}
+  const overlay = document.createElement('div');
+  overlay.id = 'nameOverlay';
+  overlay.style.position = 'fixed'; overlay.style.inset = '0'; overlay.style.background = 'rgba(0,0,0,0.6)';
+  overlay.style.display = 'flex'; overlay.style.alignItems = 'center'; overlay.style.justifyContent = 'center'; overlay.style.zIndex = '10000';
+  const panel = document.createElement('div'); panel.style.background = '#1e1e1e'; panel.style.border = '1px solid #444'; panel.style.borderRadius = '8px'; panel.style.padding = '12px 14px'; panel.style.color = '#eee'; panel.style.minWidth = '280px';
+  const title = document.createElement('div'); title.textContent = 'Enter a username'; title.style.marginBottom = '8px';
+  const input = document.createElement('input'); input.type = 'text'; input.placeholder = 'Your name'; input.style.width = '100%'; input.style.padding = '6px'; input.style.marginBottom = '8px'; input.maxLength = 20;
+  const btn = document.createElement('button'); btn.textContent = 'Start'; btn.style.padding = '6px 10px'; btn.style.cursor = 'pointer';
+  const accept = ()=>{ const name = (input.value || 'Player').trim(); state.playerName = name; try { localStorage.setItem('EE_PlayerName', name); } catch(_){} overlay.remove(); };
+  btn.addEventListener('click', accept);
+  input.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') accept(); });
+  panel.appendChild(title); panel.appendChild(input); panel.appendChild(btn); overlay.appendChild(panel); document.body.appendChild(overlay); setTimeout(()=>input.focus(),0);
+}, 0);
+
+// Round message banner
+(function ensureRoundMsg(){
+  if (document.getElementById('roundMsg')) return;
+  const div = document.createElement('div');
+  div.id = 'roundMsg'; div.style.position = 'fixed'; div.style.top = '8px'; div.style.left = '50%'; div.style.transform = 'translateX(-50%)';
+  div.style.zIndex = '9999'; div.style.background = 'rgba(0,0,0,0.6)'; div.style.border = '1px solid #555'; div.style.borderRadius = '8px'; div.style.padding = '6px 10px'; div.style.fontSize = '14px'; div.style.color = '#fff'; div.style.pointerEvents = 'none'; div.textContent = '';
+  document.body.appendChild(div);
+})();
+
 // Rendering: use original smileys.png spritesheet
 const canvas = document.getElementById('canvas');
 canvas.setAttribute('tabindex', '0');
@@ -1034,9 +1062,29 @@ let shift = {
   lastSwap: 0,
   intervalMs: 10000,
   swapping: false,
+  // round state
+  roundActive: false,
+  roundGoldStart: 0,
+  curCoinReq: 0,
+  coinDoors: new Set(),
+  firstFinishTime: 0,
+  graceMs: 30000,
+  graceEnd: 0,
+  finished: false,
+  startPos: null,
 };
 // Expose for debugging
 try { window.EE_Shift = shift; } catch (e) {}
+
+function openAllCoinDoors() {
+  if (!shift || !shift.coinDoors || !shift.coinDoors.size) return;
+  for (const key of Array.from(shift.coinDoors)) {
+    const [xs, ys] = key.split(',');
+    const x = parseInt(xs, 10), y = parseInt(ys, 10);
+    if (fgMap[y]) { fgMap[y][x] = 136; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(x, y); }
+  }
+  shift.coinDoors.clear();
+}
 
 // Console test hooks
 try {
@@ -1050,6 +1098,7 @@ try {
 
 function copyShiftRegionToWorld(srcFg, srcBg, srcDeco, srcX0, srcY0, dstX0, dstY0, w, h) {
   let goldCoinsInRegion = 0;
+  shift.coinDoors = new Set();
   for (let dy = 0; dy < h; dy++) {
     for (let dx = 0; dx < w; dx++) {
       const sx = srcX0 + dx;
@@ -1062,11 +1111,23 @@ function copyShiftRegionToWorld(srcFg, srcBg, srcDeco, srcX0, srcY0, dstX0, dstY
       if (fid === 100) goldCoinsInRegion++;
       if (did === 100) goldCoinsInRegion++;
       // Transformations:
-      // - Remove green key doors (decoration id 24)
+      // Remove green key doors (id 24) whether in foreground or decoration
+      if (fid === 24) fid = 0;
       if (did === 24) did = 0;
-      // - Convert red key doors (decoration id 23) into coin doors (approximate using solid block id 43)
-      //   Place as foreground so it blocks in our current engine
-      if (did === 23) { did = 0; fid = 43; }
+      // Convert red key doors (id 23) to coin doors (solid fg id 43) ONLY on the border of the destination box
+      const onBorder = (dx === 0 || dy === 0 || dx === w - 1 || dy === h - 1);
+      const hasRed = (fid === 23) || (did === 23);
+      if (hasRed) {
+        if (onBorder) {
+          fid = 43; // place solid coin door stand-in
+          did = (did === 23 ? 0 : did);
+          shift.coinDoors.add(`${dxw},${dyw}`);
+        } else {
+          // strip internal red doors
+          if (fid === 23) fid = 0;
+          if (did === 23) did = 0;
+        }
+      }
       // Clear destination first so left-over tiles from base level do not leak
       setTileBg(dxw, dyw, 0);
       setTileDeco(dxw, dyw, 0);
@@ -1211,7 +1272,10 @@ function placeShiftBox(levelIndex, boxIndex) {
   // Mark cache dirty
   tileCache.dirtyAll = true;
   rebuildDynamicIndex();
+  // Reset coin counters when box changes so HUD matches new box
+  try { state.coins = 0; state.blueCoins = 0; } catch(_) {}
   const coinReq = shift.lastCoinRequirement || 0;
+  shift.curCoinReq = coinReq;
   shift.lastPlaced = { db: shift.dbFile, levelIndex, boxIndex, sx0, sy0, w, h, stepX, stepY, offx, offy, baseX, baseY, ok: true, any, srcW, srcH, coinReq };
   try { window.EE_LastPlaced = shift.lastPlaced; } catch (e) {}
   shift._placing = false;
@@ -1405,6 +1469,40 @@ function drawWorld() {
     for (const k of dynamicIndex.coins) drawIfVisible(k);
     for (const k of dynamicIndex.above) drawIfVisible(k);
   }
+  // Render coin door labels (remaining coins) at border tiles
+  if (shift && shift.coinDoors && shift.coinDoors.size) {
+    ctx.save();
+    ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale, view.dpr * view.offX, view.dpr * view.offY);
+    ctx.fillStyle = '#000';
+    ctx.font = '10px system-ui, Arial';
+    const req = shift.curCoinReq || 0;
+    const remaining = Math.max(0, req - (state.coins|0));
+    for (const key of shift.coinDoors) {
+      const [xs, ys] = key.split(',');
+      const x = parseInt(xs, 10), y = parseInt(ys, 10);
+      // Only draw if tile still shows id 43
+      const idf = (fgMap[y] && fgMap[y][x]) || 0;
+      if (idf !== 43) continue;
+      const text = `${remaining}`;
+      const tw = ctx.measureText(text).width;
+      const bx = x * TILE + (16 - tw) / 2;
+      const by = y * TILE + 11;
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(bx - 2, by - 10, tw + 4, 12);
+      ctx.fillStyle = '#ffd24d';
+      ctx.fillText(text, bx, by);
+    }
+    ctx.restore();
+  }
+  // Round banner text
+  const msgEl = document.getElementById('roundMsg');
+  if (msgEl) {
+    if (shift && shift.firstFinishTime) {
+      const remain = Math.max(0, Math.ceil((shift.graceEnd - nowMs) / 1000));
+      msgEl.textContent = `${shift.finishedName || 'Player'} finished! ${remain}s left! (Need ${shift.curCoinReq||0} gold)`;
+      msgEl.style.display = 'block';
+    } else msgEl.style.display = '';
+  }
   // Optionally overlay action-only deco (e.g., arrows) debugging layer
   // for (let y = 0; y < WORLD_H; y++) { for (let x = 0; x < WORLD_W; x++) { window.EE_DrawTileFrom(ctx, x, y, decoMap); } }
   // when editing, draw a faint crosshair at mouse tile
@@ -1453,6 +1551,21 @@ function drawPlayer() {
     const rx = Math.floor(px);
     const ry = Math.floor(py);
     ctx.drawImage(smileyImg, sx, sy, FACE_SIZE, FACE_SIZE, rx, ry, FACE_SIZE, FACE_SIZE);
+    // Name tag under character
+    const name = (window.state && window.state.playerName) || '';
+    if (name) {
+      ctx.save();
+      ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale, view.dpr * view.offX, view.dpr * view.offY);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.font = '10px system-ui, Arial';
+      const tw = ctx.measureText(name).width;
+      const cx = Math.floor(state.p.x + 8 - tw/2);
+      const cy = Math.floor(state.p.y + 20 + 10);
+      ctx.fillRect(cx - 3, cy - 9, tw + 6, 12);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(name, cx, cy);
+      ctx.restore();
+    }
   } else {
     ctx.fillStyle = '#ff0';
     ctx.fillRect(state.p.x, state.p.y, 16, 16);
@@ -1516,12 +1629,14 @@ function updateHud() {
       base += ` | Box ${lp.levelIndex}:${lp.boxIndex} from (${lp.sx0},${lp.sy0}) any=${lp.any}`;
       if (typeof lp.coinReq === 'number') base += ` | CoinReq≈${lp.coinReq}`;
     }
+    if (shift && shift.roundActive) base += ` | Round: ON${shift.firstFinishTime?'/GRACE':''}`;
     wi.textContent = base;
   }
   const insp = document.getElementById('inspect');
   if (insp && state.inspectInfo) {
-    const { x, y, bg, deco, fg } = state.inspectInfo;
-    insp.textContent = `Tile (${x}, ${y}) | FG: ${fg} | Deco: ${deco} | BG: ${bg}`;
+    const { x, y, bg, deco, fg, boxRel } = state.inspectInfo;
+    const extra = boxRel ? ` | Box(${boxRel.relX},${boxRel.relY})` : '';
+    insp.textContent = `Tile (${x}, ${y}) | FG: ${fg} | Deco: ${deco} | BG: ${bg}${extra}`;
   }
   const goldEl = document.getElementById('goldCount');
   const blueEl = document.getElementById('blueCount');
@@ -1594,6 +1709,36 @@ function tick() {
       if (typeof window.markDirtyTile === 'function') window.markDirtyTile(cx, cy);
       // play EE coin sfx if available
       if (typeof window.playCoinSfx === 'function') window.playCoinSfx();
+      // If requirement met, open all coin doors immediately
+      if (shift && shift.roundActive && (state.coins|0) >= (shift.curCoinReq||0)) {
+        openAllCoinDoors();
+      }
+      // If inside play box and coin requirement met, mark finish when touching red-door stand-in
+      if (shift && shift.roundActive) {
+        const inBox = (cx >= shift.dst.x0 && cx <= shift.dst.x1 && cy >= shift.dst.y0 && cy <= shift.dst.y1);
+        if (inBox && state.coins >= (shift.curCoinReq||0)) {
+          // Detect reaching red door stand-in (we used solid id 43 as stand-in on foreground)
+          // Check around center for the stand-in in fg/deco
+          const near = [ [0,0],[1,0],[-1,0],[0,1],[0,-1] ];
+          let atDoor = false;
+          for (const [dx,dy] of near) {
+            const tx = cx+dx, ty = cy+dy;
+            const idf = (fgMap[ty] && fgMap[ty][tx]) || 0;
+            const idd = (decoMap[ty] && decoMap[ty][tx]) || 0;
+            if (idf === 43 || idd === 23) { atDoor = true; break; }
+          }
+          if (atDoor) {
+            // Open coin doors: convert FG id 43 at all border positions to id 136 (open coin door sprite, non-blocking)
+            openAllCoinDoors();
+            if (!shift.firstFinishTime) {
+              shift.firstFinishTime = performance.now();
+              shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
+              shift.finished = true;
+              shift.finishedName = (window.state && window.state.playerName) || 'Player';
+            }
+          }
+        }
+      }
     }
   }
   const centerDeco = (decoMap[cy] && decoMap[cy][cx]) || 0;
@@ -1731,6 +1876,7 @@ function loop() {
     if (!shift.lastSwap && shift.baseReady) {
       shift.lastSwap = now;
       loadShiftDBOnce().then(()=>{ placeShiftBox(1,1); }).catch(()=>{});
+      shift.roundActive = true; shift.firstFinishTime = 0; shift.finishedName = '';
     }
     if (now - shift.lastSwap > shift.intervalMs && !shift.swapping) {
       shift.swapping = true;
@@ -1740,6 +1886,21 @@ function loop() {
       shift.curBox = nextBox;
       shift.lastSwap = now;
       shift.swapping = false;
+    }
+    // If grace running and timer expired, advance difficulty (placeholder) and respawn player
+    if (shift.firstFinishTime && now >= shift.graceEnd) {
+      // Increase difficulty/box for demo: increment level cycling 1..7, reset box to 1
+      shift.curLevel = ((shift.curLevel) % 7) + 1;
+      shift.curBox = 1;
+      placeShiftBox(shift.curLevel, shift.curBox);
+      // Teleport player to start (top-left inside play box)
+      state.p.x = (shift.dst.x0 + 1) * TILE;
+      state.p.y = (shift.dst.y0 + 1) * TILE;
+      state.coins = 0; state.blueCoins = 0;
+      // ensure doors are closed for new box
+      // (coin doors set up during placement; nothing else to do here)
+      shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
+      shift.lastSwap = now;
     }
   }
   // Smooth zoom step (avoid using now-last; use a fixed interpolation for stability)
@@ -1853,13 +2014,23 @@ addEventListener('keyup', (e) => {
     state.p.spaceHeld = state.input.jump;
   }
   if (e.key === 'i' || e.key === 'I') {
-    // Inspect mouse cursor tile coords and IDs
+    // Inspect mouse cursor tile coords and IDs and also map to DB-space box coords
     const tx = (mouse && mouse.tile) ? mouse.tile.x : Math.floor((state.p.x + 8) / TILE);
     const ty = (mouse && mouse.tile) ? mouse.tile.y : Math.floor((state.p.y + 8) / TILE);
     const idBg = (bgMap[ty] && bgMap[ty][tx]) || 0;
     const idDe = (decoMap[ty] && decoMap[ty][tx]) || 0;
     const idFg = (fgMap[ty] && fgMap[ty][tx]) || 0;
-    state.inspectInfo = { x: tx, y: ty, bg: idBg, deco: idDe, fg: idFg };
+    const inBox = (tx >= shift.dst.x0 && tx <= shift.dst.x1 && ty >= shift.dst.y0 && ty <= shift.dst.y1);
+    let boxRel = null;
+    if (inBox) {
+      const relX = (tx - shift.dst.x0) + 1; // 1-based
+      const relY = (ty - shift.dst.y0) + 1;
+      boxRel = { relX, relY };
+    }
+    state.inspectInfo = { x: tx, y: ty, bg: idBg, deco: idDe, fg: idFg, boxRel };
+    if (boxRel) {
+      console.log(`Box-relative: (${boxRel.relX}, ${boxRel.relY})`);
+    }
   }
 });
 function clearInputs() {
