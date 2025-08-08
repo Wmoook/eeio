@@ -486,7 +486,7 @@ function tryLoadLevelFromEELVL(bytes) {
         const xLen = dv.getUint32(i + 8);
         const xsStart = i + 12;
         const xsEnd = xsStart + xLen;
-        if (!(layer === 0 || layer === 1) || (xLen % 2 !== 0) || xsEnd + 4 > end) { i++; continue; }
+        if (!(layer === 0 || layer === 1 || layer === 2) || (xLen % 2 !== 0) || xsEnd + 4 > end) { i++; continue; }
         const yLen = dv.getUint32(xsEnd);
         const ysStart = xsEnd + 4;
         const ysEnd = ysStart + yLen;
@@ -522,8 +522,16 @@ function tryLoadLevelFromEELVL(bytes) {
     const minimap = dv.getUint8(p); p += 1;
     const ownerId = readUTF();
     // Skip the rest of header by scanning blocks (we will try to parse blocks array by array)
-    WORLD_W = Math.max(3, w);
-    WORLD_H = Math.max(3, h);
+    // Determine true dimensions by deep scanning all records first
+    let maxHeaderW = Math.max(3, w);
+    let maxHeaderH = Math.max(3, h);
+    const preRecords = (function(){ try { return deepScanAllRecords(); } catch(_) { return []; } })();
+    let maxX = 0, maxY = 0;
+    for (const r of preRecords) {
+      for (let k = 0; k < r.xs.length; k++) { if (r.xs[k] > maxX) maxX = r.xs[k]; if (r.ys[k] > maxY) maxY = r.ys[k]; }
+    }
+    WORLD_W = Math.max(maxHeaderW, maxX + 1);
+    WORLD_H = Math.max(maxHeaderH, maxY + 1);
     clearWorld();
     initMap();
     // Build bounding border if not present in data
@@ -535,8 +543,8 @@ function tryLoadLevelFromEELVL(bytes) {
         const type = dv.getInt32(pos);
         const layer = dv.getInt32(pos + 4);
         const xLen = dv.getUint32(pos + 8);
-        // basic sanity: layer 0/1, xLen even and not huge
-        if ((layer === 0 || layer === 1) && xLen % 2 === 0 && xLen < 1e7) {
+        // basic sanity: layer 0/1/2, xLen even and not huge
+        if ((layer === 0 || layer === 1 || layer === 2) && xLen % 2 === 0 && xLen < 1e7) {
           const xEnd = pos + 12 + xLen;
           if (xEnd + 4 <= dv.byteLength) {
             const yLen = dv.getUint32(xEnd);
@@ -628,7 +636,7 @@ function tryLoadLevelFromEELVL(bytes) {
         const xLen = dv.getUint32(i + 8);
         const xsStart = i + 12;
         const xsEnd = xsStart + xLen;
-        if (!(layer === 0 || layer === 1) || (xLen % 2 !== 0) || xsEnd + 4 > end) { i++; continue; }
+        if (!(layer === 0 || layer === 1 || layer === 2) || (xLen % 2 !== 0) || xsEnd + 4 > end) { i++; continue; }
         const yLen = dv.getUint32(xsEnd);
         const ysStart = xsEnd + 4;
         const ysEnd = ysStart + yLen;
@@ -651,6 +659,8 @@ function tryLoadLevelFromEELVL(bytes) {
           for (let k = 0; k < count; k++) { setTileFg(xsArr[k], ysArr[k], id); placed++; }
         } else if (layer === 1) {
           for (let k = 0; k < count; k++) { setTileBg(xsArr[k], ysArr[k], id); placed++; }
+        } else if (layer === 2) {
+          for (let k = 0; k < count; k++) { setTileDeco(xsArr[k], ysArr[k], id); }
         }
         recs++;
         i = ysEnd; // jump past arrays; extras (if any) will be skipped by scanning
@@ -666,6 +676,274 @@ function tryLoadLevelFromEELVL(bytes) {
     for (let y = 0; y < WORLD_H; y++) { solid.add(`0,${y}`); solid.add(`${WORLD_W-1},${y}`); }
     window.eelvlStats = { error: true, width: WORLD_W, height: WORLD_H, records: 0, tiles: 0 };
   }
+}
+
+// Pure parser variant: returns detached maps without mutating global world
+function parseEELVLToMaps(bytes) {
+  let inflated;
+  let dv;
+  try {
+    try { inflated = pako.inflate(bytes); } catch { inflated = pako.inflateRaw(bytes); }
+  } catch {
+    try { inflated = pako.ungzip(bytes); } catch { return null; }
+  }
+  dv = new DataView(inflated.buffer);
+  let p = 0;
+  function readUTF() {
+    if (p + 2 > dv.byteLength) return '';
+    const len = dv.getUint16(p); p += 2;
+    const slice = inflated.subarray(p, p + len); p += len;
+    return new TextDecoder().decode(slice);
+  }
+  function readInt() { const v = dv.getInt32(p); p += 4; return v; }
+  function readFloat() { const v = dv.getFloat32(p); p += 4; return v; }
+  function readUInt() { const v = dv.getUint32(p); p += 4; return v; }
+
+  function deepScanAllRecords() {
+    const records = [];
+    let i = 0; const end = dv.byteLength;
+    while (i + 12 <= end) {
+      const id = dv.getInt32(i);
+      const layer = dv.getInt32(i + 4);
+      const xLen = dv.getUint32(i + 8);
+      const xsStart = i + 12; const xsEnd = xsStart + xLen;
+      if (!(layer === 0 || layer === 1 || layer === 2) || (xLen % 2 !== 0) || xsEnd + 4 > end) { i++; continue; }
+      const yLen = dv.getUint32(xsEnd);
+      const ysStart = xsEnd + 4; const ysEnd = ysStart + yLen;
+      if (yLen % 2 !== 0 || ysEnd > end) { i++; continue; }
+      const count = xLen >> 1; if ((yLen >> 1) !== count) { i++; continue; }
+      const xsArr = new Array(count); const ysArr = new Array(count);
+      for (let k = 0; k < count; k++) {
+        xsArr[k] = (inflated[xsStart + (k<<1)] << 8) | inflated[xsStart + (k<<1) + 1];
+        ysArr[k] = (inflated[ysStart + (k<<1)] << 8) | inflated[ysStart + (k<<1) + 1];
+      }
+      records.push({ id, layer, xs: xsArr, ys: ysArr });
+      i = ysEnd;
+    }
+    return records;
+  }
+
+  try {
+    // Header
+    const owner = readUTF();
+    const worldName = readUTF();
+    const wHeader = readInt();
+    const hHeader = readInt();
+    const grav = readFloat();
+    const bgCol = readUInt();
+    const desc = readUTF();
+    const campaign = dv.getUint8(p); p += 1; const crewId = readUTF(); const crewName = readUTF();
+    const crewStatus = readInt(); const minimap = dv.getUint8(p); p += 1; const ownerId = readUTF();
+
+    function findNextRecordPos(start) {
+      for (let pos = start; pos < dv.byteLength - 12; pos++) {
+        const type = dv.getInt32(pos);
+        const layer = dv.getInt32(pos + 4);
+        const xLen = dv.getUint32(pos + 8);
+        if ((layer === 0 || layer === 1 || layer === 2) && xLen % 2 === 0 && xLen < 1e7) {
+          const xEnd = pos + 12 + xLen;
+          if (xEnd + 4 <= dv.byteLength) {
+            const yLen = dv.getUint32(xEnd);
+            if (yLen % 2 === 0 && yLen < 1e7 && xEnd + 4 + yLen <= dv.byteLength) {
+              return pos;
+            }
+          }
+        }
+      }
+      return -1;
+    }
+
+    // Derive dimensions via deep scan first (more reliable than header)
+    const pre = deepScanAllRecords();
+    let maxX = 0, maxY = 0;
+    for (const r of pre) { for (let i = 0; i < r.xs.length; i++) { if (r.xs[i] > maxX) maxX = r.xs[i]; if (r.ys[i] > maxY) maxY = r.ys[i]; } }
+    const W = Math.max(3, Math.max(wHeader, maxX + 1));
+    const H = Math.max(3, Math.max(hHeader, maxY + 1));
+    const fg = new Array(H); const bgm = new Array(H); const deco = new Array(H);
+    for (let y = 0; y < H; y++) { fg[y] = new Array(W).fill(0); bgm[y] = new Array(W).fill(0); deco[y] = new Array(W).fill(0); }
+
+    // Try to iterate structured records starting where header left off
+    let placed = 0;
+    const firstPos = findNextRecordPos(p);
+    if (firstPos !== -1) {
+      p = firstPos;
+      while (p + 12 <= dv.byteLength) {
+        const blockId = readInt();
+        const layer = readInt();
+        const xLen = readUInt();
+        const xs = inflated.subarray(p, p + xLen); p += xLen;
+        const yLen = readUInt();
+        const ys = inflated.subarray(p, p + yLen); p += yLen;
+        const xsArr = []; for (let i = 0; i < xs.length; i += 2) xsArr.push((xs[i] << 8) | xs[i+1]);
+        const ysArr = []; for (let i = 0; i < ys.length; i += 2) ysArr.push((ys[i] << 8) | ys[i+1]);
+        if (layer === 0) {
+          for (let i = 0; i < xsArr.length; i++) { const x = xsArr[i], y = ysArr[i]; if (x>=0&&y>=0&&x<W&&y<H) { fg[y][x] = blockId; placed++; } }
+        } else if (layer === 1) {
+          for (let i = 0; i < xsArr.length; i++) { const x = xsArr[i], y = ysArr[i]; if (x>=0&&y>=0&&x<W&&y<H) { bgm[y][x] = blockId; placed++; } }
+        } else if (layer === 2) {
+          for (let i = 0; i < xsArr.length; i++) { const x = xsArr[i], y = ysArr[i]; if (x>=0&&y>=0&&x<W&&y<H) { deco[y][x] = blockId; } }
+        }
+        const nextPos = findNextRecordPos(p); if (nextPos === -1) break; p = nextPos;
+      }
+    }
+    // Fallback to deep scan results if structured pass placed nothing
+    if (!placed) {
+      for (const r of pre) {
+        if (r.layer === 0) { for (let i = 0; i < r.xs.length; i++) { const x = r.xs[i], y = r.ys[i]; if (x>=0&&y>=0&&x<W&&y<H) fg[y][x] = r.id; } }
+        else if (r.layer === 1) { for (let i = 0; i < r.xs.length; i++) { const x = r.xs[i], y = r.ys[i]; if (x>=0&&y>=0&&x<W&&y<H) bgm[y][x] = r.id; } }
+        else if (r.layer === 2) { for (let i = 0; i < r.xs.length; i++) { const x = r.xs[i], y = r.ys[i]; if (x>=0&&y>=0&&x<W&&y<H) deco[y][x] = r.id; } }
+      }
+    }
+    return { fg, bg: bgm, deco, W, H };
+  } catch (e) {
+    return null;
+  }
+}
+
+// AMF3-aware parser for DB files. Tries AMF3 first, then binary deep-scan.
+function parseEELVL_DB(bytes, forcedW = 400, forcedH = 200) {
+  // Helper: AMF3 path
+  function parseViaAMF3(rawBytes){
+    const AMF = (typeof window !== 'undefined') && (window.AMF3 && typeof window.AMF3.decode === 'function') ? window.AMF3 : null;
+    if (!AMF) return null;
+    let root = AMF.decode(rawBytes);
+    if (!root || (root instanceof Uint8Array)) {
+      // Try inflate then decode (DB files may be zlib-compressed AMF3)
+      try {
+        const inflated = pako.inflate(rawBytes);
+        root = AMF.decode(inflated);
+      } catch(_) { /* fallthrough */ }
+    }
+    if (!root || (root instanceof Uint8Array)) return null;
+    // DBs should always be 400x200; ignore header width/height and enforce forced dims
+    const W = forcedW, H = forcedH;
+    const queue = [root];
+    for (let qi=0; qi<queue.length && qi<5000; qi++) {
+      const cur = queue[qi];
+      if (Array.isArray(cur)) {
+        for (const v of cur) if (v && (typeof v === 'object' || Array.isArray(v))) queue.push(v);
+      } else if (cur && typeof cur === 'object') {
+        for (const k in cur) {
+          const v = cur[k];
+          if (v && (typeof v === 'object' || Array.isArray(v))) queue.push(v);
+        }
+      }
+    }
+    const fg = new Array(H); const bg = new Array(H); const deco = new Array(H);
+    for (let y = 0; y < H; y++) { fg[y] = new Array(W).fill(0); bg[y] = new Array(W).fill(0); deco[y] = new Array(W).fill(0); }
+    let placed = 0; let recs = 0;
+    function asU16Pairs(buf){
+      // buf may be Uint8Array or number[]
+      if (buf instanceof Uint8Array) {
+        const n = buf.length >> 1; const out = new Array(n);
+        for (let i=0;i<n;i++){ out[i] = buf[(i<<1)] | (buf[(i<<1)+1] << 8); }
+        return out;
+      }
+      if (Array.isArray(buf)) return buf.map(v => v|0);
+      return [];
+    }
+    function tryPlaceRecord(obj){
+      if (!obj || typeof obj !== 'object') return false;
+      const id = obj.id ?? obj.blockId ?? obj.type ?? null;
+      const layer = obj.layer ?? obj.plane ?? obj.l ?? null;
+      const xsBA = obj.xs ?? obj.Xs ?? obj.x ?? obj.X ?? null;
+      const ysBA = obj.ys ?? obj.Ys ?? obj.y ?? obj.Y ?? null;
+      if (!Number.isFinite(id) || !Number.isFinite(layer) || xsBA == null || ysBA == null) return false;
+      const xs = asU16Pairs(xsBA);
+      const ys = asU16Pairs(ysBA);
+      if (!xs.length || xs.length !== ys.length) return false;
+      for (let i=0;i<xs.length;i++){
+        const x = xs[i], y = ys[i];
+        if (x>=0 && x<W && y>=0 && y<H) {
+          if (layer === 0) fg[y][x] = id|0;
+          else if (layer === 1) bg[y][x] = id|0;
+          else if (layer === 2) deco[y][x] = id|0;
+          placed++;
+        }
+      }
+      recs++;
+      return true;
+    }
+    // Traverse and place from any record-like objects
+    for (let qi=0; qi<queue.length && qi<20000; qi++) {
+      const cur = queue[qi];
+      if (Array.isArray(cur)) {
+        for (const v of cur) tryPlaceRecord(v);
+      } else if (cur && typeof cur === 'object') {
+        // Some containers use keys like 'blocks' or 'records'
+        if (cur.blocks && Array.isArray(cur.blocks)) {
+          for (const v of cur.blocks) tryPlaceRecord(v);
+        }
+        if (cur.records && Array.isArray(cur.records)) {
+          for (const v of cur.records) tryPlaceRecord(v);
+        }
+        // Also try directly
+        tryPlaceRecord(cur);
+      }
+    }
+    if (placed === 0) return null;
+    try { window.EE_DBStats = { placed, W, H, bytes: rawBytes.length, source: 'AMF3' }; } catch(_) {}
+    return { fg, bg, deco, W, H, placed };
+  }
+
+  // Try to inflate; if not compressed, keep as raw for AMF3
+  let inflated = bytes;
+  try {
+    try { inflated = pako.inflate(bytes); }
+    catch { try { inflated = pako.inflateRaw(bytes); } catch { try { inflated = pako.ungzip(bytes); } catch { inflated = bytes; } } }
+  } catch { inflated = bytes; }
+  // First attempt AMF3 decode path using raw or inflated bytes
+  const viaAmf = parseViaAMF3(inflated) || parseViaAMF3(bytes);
+  if (viaAmf) return viaAmf;
+  const dv = new DataView(inflated.buffer);
+  const W = forcedW, H = forcedH;
+  const fg = new Array(H); const bg = new Array(H); const deco = new Array(H);
+  for (let y = 0; y < H; y++) { fg[y] = new Array(W).fill(0); bg[y] = new Array(W).fill(0); deco[y] = new Array(W).fill(0); }
+  const end = dv.byteLength;
+  let pos = 0; let placed = 0;
+  // Helper to scan with a specific endianness for 16-bit coords
+  function scanWithEndian(isBigEndian){
+    let p = 0; let localPlaced = 0;
+    while (p + 12 <= end) {
+      const id = dv.getInt32(p);
+      const layer = dv.getInt32(p + 4);
+      const xLen = dv.getUint32(p + 8);
+      const xsStart = p + 12;
+      const xsEnd = xsStart + xLen;
+      if (!(layer === 0 || layer === 1 || layer === 2) || (xLen % 2 !== 0) || xsEnd + 4 > end) { p++; continue; }
+      const yLen = dv.getUint32(xsEnd);
+      const ysStart = xsEnd + 4;
+      const ysEnd = ysStart + yLen;
+      if (yLen % 2 !== 0 || ysEnd > end) { p++; continue; }
+      const count = xLen >> 1;
+      if ((yLen >> 1) !== count || count <= 0 || count > 200000) { p++; continue; }
+      for (let k = 0; k < count; k++) {
+        let xv, yv;
+        if (isBigEndian) {
+          xv = (inflated[xsStart + (k<<1)] << 8) | (inflated[xsStart + (k<<1) + 1]);
+          yv = (inflated[ysStart + (k<<1)] << 8) | (inflated[ysStart + (k<<1) + 1]);
+        } else {
+          xv = (inflated[xsStart + (k<<1)]) | (inflated[xsStart + (k<<1) + 1] << 8);
+          yv = (inflated[ysStart + (k<<1)]) | (inflated[ysStart + (k<<1) + 1] << 8);
+        }
+        if (xv >= 0 && xv < W && yv >= 0 && yv < H) {
+          if (layer === 0) { fg[yv][xv] = id|0; localPlaced++; }
+          else if (layer === 1) { bg[yv][xv] = id|0; localPlaced++; }
+          else if (layer === 2) { deco[yv][xv] = id|0; }
+        }
+      }
+      p = ysEnd;
+    }
+    return localPlaced;
+  }
+  // Prefer big-endian (matches other parsers); fallback to little-endian
+  placed = scanWithEndian(true);
+  if (placed < 100) {
+    // Try little-endian if BE yielded too few
+    placed += scanWithEndian(false);
+  }
+  try { window.EE_DBStats = { placed, W, H, bytes: bytes.length, source: 'DEEP_SCAN' }; } catch(_) {}
+  return { fg, bg, deco, W, H, placed };
 }
 
 // Rendering: use original smileys.png spritesheet
@@ -728,11 +1006,19 @@ smileyImg.src = './smileys.png';
 const auraImg = new Image();
 auraImg.src = './auras_staff.png';
 let levelData = null;
-// Load the provided world file. Spaces in path are URL encoded automatically when serving locally.
-fetch('./EX%20Crew%20Shift%20%5BTest%5D.eelvl').then(r => r.arrayBuffer()).then(buf => {
-  levelData = new Uint8Array(buf);
-  tryLoadLevelFromEELVL(levelData);
-}).catch(()=>{ /* fallback to default world */ });
+// Load the play world (EX Crew Shift [Test].eelvl) as main world; Shift will overlay boxes into its play area
+(async function loadPlayWorld(){
+  try {
+    const buf = await fetch('./EX Crew Shift [Test].eelvl').then(r=>r.arrayBuffer());
+    const bytes = new Uint8Array(buf);
+    tryLoadLevelFromEELVL(bytes);
+    // If header-based parser mis-sized, keep result; this file should be standard EEO and parse fine
+    window.eelvlStats = Object.assign({ source: 'PLAY_WORLD' }, window.eelvlStats || { width: WORLD_W, height: WORLD_H, records: 0, tiles: 0 });
+  } catch(_) {
+    // Keep default world
+  }
+  try { shift.baseReady = true; } catch(_) {}
+})();
 
 // SHIFT: DB loader and box rotator
 let shift = {
@@ -741,83 +1027,170 @@ let shift = {
   boxW: 32,
   boxH: 27,
   dst: { x0: 36, y0: 48, x1: 67, y1: 74 },
+  // fine-tune source sampling offset: shift 1 tile right and 1 tile down
+  srcOffset: { x: 1, y: 1 },
   curBox: 1,
   curLevel: 1,
   lastSwap: 0,
   intervalMs: 10000,
   swapping: false,
 };
+// Expose for debugging
+try { window.EE_Shift = shift; } catch (e) {}
+
+// Console test hooks
+try {
+  window.dumpShift = function(){
+    console.log('EE_DBStats', window.EE_DBStats);
+    console.log('EE_ShiftDebug', window.EE_ShiftDebug);
+    console.log('EE_LastPlaced', window.EE_LastPlaced);
+  };
+  window.placeShiftBoxManual = function(level, box){ try { placeShiftBox(level|0, box|0); } catch(e){ console.error(e); } };
+} catch(_) {}
 
 function copyShiftRegionToWorld(srcFg, srcBg, srcDeco, srcX0, srcY0, dstX0, dstY0, w, h) {
+  let goldCoinsInRegion = 0;
   for (let dy = 0; dy < h; dy++) {
     for (let dx = 0; dx < w; dx++) {
       const sx = srcX0 + dx;
       const sy = srcY0 + dy;
       const dxw = dstX0 + dx;
       const dyw = dstY0 + dy;
-      const fid = (srcFg[sy] && srcFg[sy][sx]) || 0;
-      const bid = (srcBg[sy] && srcBg[sy][sx]) || 0;
-      const did = (srcDeco[sy] && srcDeco[sy][sx]) || 0;
+      let fid = (srcFg[sy] && srcFg[sy][sx]) || 0;
+      let bid = (srcBg[sy] && srcBg[sy][sx]) || 0;
+      let did = (srcDeco[sy] && srcDeco[sy][sx]) || 0;
+      if (fid === 100) goldCoinsInRegion++;
+      if (did === 100) goldCoinsInRegion++;
+      // Transformations:
+      // - Remove green key doors (decoration id 24)
+      if (did === 24) did = 0;
+      // - Convert red key doors (decoration id 23) into coin doors (approximate using solid block id 43)
+      //   Place as foreground so it blocks in our current engine
+      if (did === 23) { did = 0; fid = 43; }
+      // Clear destination first so left-over tiles from base level do not leak
+      setTileBg(dxw, dyw, 0);
+      setTileDeco(dxw, dyw, 0);
+      setTileFg(dxw, dyw, 0);
       setTileBg(dxw, dyw, bid|0);
       setTileDeco(dxw, dyw, did|0);
       setTileFg(dxw, dyw, fid|0);
     }
   }
+  shift.lastCoinRequirement = goldCoinsInRegion;
 }
 
 async function loadShiftDBOnce() {
   if (shift.dbBytes && shift.dbMaps) return;
   try {
-    async function fetchFirst(urls){
-      let lastErr;
-      for (const u of urls){
-        try {
-          const res = await fetch(u);
-          if (res.ok) return await res.arrayBuffer();
-        } catch (e) { lastErr = e; }
-      }
-      if (lastErr) throw lastErr; else throw new Error('No DB file found');
-    }
+    // Try multiple DB filenames; parse via AMF3/deep-scan directly
     const candidates = [
-      './EX Shift DB1 -nou(1).eelvl',
-      './EX Shift DB1 - nou(1).eelvl',
       './EX Shift MDB1 - nou(1).eelvl',
-      './EX%20Shift%20DB1%20-nou%281%29.eelvl',
-      './EX%20Shift%20DB1%20-%20nou%281%29.eelvl',
-      './EX%20Shift%20MDB1%20-%20nou%281%29.eelvl'
+      './EX Shift DB2 - nou.eelvl',
+      './EX Shift DB3 - nou.eelvl'
     ];
-    const buf = await fetchFirst(candidates);
-    shift.dbBytes = new Uint8Array(buf);
-    // Parse DB once into temporary world, snapshot maps, then restore current world
-    const saved = { fg: fgMap, bg: bgMap, deco: decoMap, W: WORLD_W, H: WORLD_H, solid: new Set(solid) };
-    tryLoadLevelFromEELVL(shift.dbBytes);
-    const dbFg = new Array(WORLD_H);
-    const dbBg = new Array(WORLD_H);
-    const dbDe = new Array(WORLD_H);
-    for (let y = 0; y < WORLD_H; y++) {
-      dbFg[y] = (fgMap[y] ? fgMap[y].slice() : []);
-      dbBg[y] = (bgMap[y] ? bgMap[y].slice() : []);
-      dbDe[y] = (decoMap[y] ? decoMap[y].slice() : []);
+    const dbs = [];
+    for (const url of candidates) {
+      try {
+        const ab = await fetch(url).then(r => r.arrayBuffer());
+        const bytes = new Uint8Array(ab);
+        const parsed = parseEELVL_DB(bytes, 400, 200);
+        if (parsed && parsed.W >= 400 && parsed.H >= 200) {
+          const cols = Math.floor(parsed.W / 32);
+          const rows = Math.floor(parsed.H / 27);
+          dbs.push({ url, bytes, maps: parsed, cols, rows });
+        }
+      } catch (_) { /* ignore missing */ }
     }
-    shift.dbMaps = { fg: dbFg, bg: dbBg, deco: dbDe, W: WORLD_W, H: WORLD_H };
-    // Restore saved world
-    fgMap = saved.fg; bgMap = saved.bg; decoMap = saved.deco; WORLD_W = saved.W; WORLD_H = saved.H;
-    solid.clear(); saved.solid.forEach(v => solid.add(v));
-    window.fgMap = fgMap; window.bgMap = bgMap; window.decoMap = decoMap;
-    tileCache.dirtyAll = true;
+    if (!dbs.length) throw new Error('No DB candidate parsed');
+    // Build stitched layout: place DBs side-by-side into one big atlas (foreground/background/decoration)
+    let stitchW = 0, stitchH = 0; const stepX = 32, stepY = 27;
+    for (const d of dbs) { stitchW += d.maps.W; if (d.maps.H > stitchH) stitchH = d.maps.H; }
+    const fgSt = new Array(stitchH); const bgSt = new Array(stitchH); const deSt = new Array(stitchH);
+    for (let y = 0; y < stitchH; y++) { fgSt[y] = new Array(stitchW).fill(0); bgSt[y] = new Array(stitchW).fill(0); deSt[y] = new Array(stitchW).fill(0); }
+    let xOffset = 0; const dbOffsets = [];
+    for (const d of dbs) {
+      dbOffsets.push({ url: d.url, x0: xOffset, W: d.maps.W, H: d.maps.H });
+      for (let y = 0; y < d.maps.H; y++) {
+        const srcFgRow = d.maps.fg[y] || []; const srcBgRow = d.maps.bg[y] || []; const srcDeRow = d.maps.deco[y] || [];
+        for (let x = 0; x < d.maps.W; x++) {
+          fgSt[y][xOffset + x] = srcFgRow[x] || 0;
+          bgSt[y][xOffset + x] = srcBgRow[x] || 0;
+          deSt[y][xOffset + x] = srcDeRow[x] || 0;
+        }
+      }
+      xOffset += d.maps.W;
+    }
+    // Compute total columns/rows in stitched atlas
+    const totalCols = Math.floor(stitchW / stepX);
+    const totalRows = Math.floor(stitchH / stepY);
+    shift.dbStitched = { fg: fgSt, bg: bgSt, deco: deSt, W: stitchW, H: stitchH, offsets: dbOffsets };
+    shift.dbMaps = shift.dbStitched; // use stitched for placement
+    shift.totalCols = totalCols; shift.totalRows = totalRows;
+    shift.dbFile = 'STITCHED(DB1+DB2+DB3)';
+    // Build DB stats summary
+    try {
+      function countLayer(map){
+        let c = 0; for (let y=0;y<map.length;y++){ const row = map[y]||[]; for (let x=0;x<row.length;x++){ if (row[x]) c++; } } return c;
+      }
+      const perDb = dbs.map(d=>{
+        const cFg = countLayer(d.maps.fg);
+        const cBg = countLayer(d.maps.bg);
+        const cDe = countLayer(d.maps.deco);
+        return { url: d.url, W: d.maps.W, H: d.maps.H, tiles: { fg: cFg, bg: cBg, deco: cDe, total: cFg + cBg + cDe } };
+      });
+      const stitchedTiles = { fg: countLayer(fgSt), bg: countLayer(bgSt), deco: countLayer(deSt) };
+      stitchedTiles.total = stitchedTiles.fg + stitchedTiles.bg + stitchedTiles.deco;
+      window.EE_DBStats = {
+        dbs: perDb,
+        stitched: { W: stitchW, H: stitchH, tiles: stitchedTiles },
+        stepX, stepY
+      };
+    } catch(_) {}
+    try {
+      window.EE_ShiftDebug = {
+        stitched: true,
+        files: dbs.map(d=>({url:d.url, W:d.maps.W, H:d.maps.H})),
+        stitchW, stitchH,
+        dbW: 400, dbH: 200,
+        originX: 0, originY: 0,
+        totalCols, totalRows, stepX, stepY
+      };
+    } catch(_) {}
+    // Fixed tile box size
+    shift.dbOrigin = { x: 0, y: 0 };
+    shift.dbStep = { x: 32, y: 27 };
+    // second debug line removed; world was already restored per-candidate
   } catch (e) {
-    shift.enabled = false;
+    shift.enabled = true; // keep enabled; we will try again next frame
+    shift.lastError = String(e && e.message || e);
+    try { window.EE_ShiftDebug = Object.assign({}, window.EE_ShiftDebug||{}, { error: shift.lastError }); } catch (_) {}
   }
 }
 
 function placeShiftBox(levelIndex, boxIndex) {
   if (!shift.dbMaps) return;
-  const srcFg = shift.dbMaps.fg, srcBg = shift.dbMaps.bg, srcDeco = shift.dbMaps.deco;
-  // Compute source rect (1-based in spec). Convert to 0-based indices
+  // Guard against runaway recursion re-entry
+  if (shift._placing) return;
+  shift._placing = true;
   const w = shift.boxW, h = shift.boxH;
-  let sx0 = (boxIndex - 1) * w; // assume zero-based data
-  let sy0 = (levelIndex - 1) * h; // assume zero-based data
-  // Heuristic: if region appears empty, try +1 offset to handle 1-based DB coordinates
+  const stepX = 32, stepY = 27;
+  const srcFg = shift.dbMaps.fg, srcBg = shift.dbMaps.bg, srcDeco = shift.dbMaps.deco;
+  const srcW = shift.dbMaps.W, srcH = shift.dbMaps.H;
+  const offx = (shift.srcOffset && Number.isFinite(shift.srcOffset.x)) ? (shift.srcOffset.x|0) : 0;
+  const offy = (shift.srcOffset && Number.isFinite(shift.srcOffset.y)) ? (shift.srcOffset.y|0) : 0;
+  const baseX = (boxIndex - 1) * stepX;
+  const baseY = (levelIndex - 1) * stepY;
+  let sx0 = baseX + offx;
+  let sy0 = baseY + offy;
+  if (sx0 < 0) sx0 = 0;
+  if (sy0 < 0) sy0 = 0;
+  // Clamp to DB bounds
+  if (sx0 < 0 || sy0 < 0 || sx0 + w > srcW || sy0 + h > srcH) {
+    shift.lastPlaced = { db: shift.dbFile, levelIndex, boxIndex, sx0, sy0, w, h, ok: false, reason: 'out_of_bounds', srcW, srcH };
+    try { window.EE_LastPlaced = shift.lastPlaced; } catch(_) {}
+    shift._placing = false;
+    return;
+  }
   const regionHasAny = (x0, y0) => {
     let nonzero = 0;
     for (let dy = 0; dy < h && nonzero < 4; dy++) {
@@ -832,16 +1205,16 @@ function placeShiftBox(levelIndex, boxIndex) {
     }
     return nonzero > 0;
   };
-  if (!regionHasAny(sx0, sy0)) {
-    if (regionHasAny(sx0 + 1, sy0 + 1)) { sx0 += 1; sy0 += 1; }
-    else if (regionHasAny(sx0 + 1, sy0)) { sx0 += 1; }
-    else if (regionHasAny(sx0, sy0 + 1)) { sy0 += 1; }
-  }
+  const any = regionHasAny(sx0, sy0);
   // Copy region into destination box
   copyShiftRegionToWorld(srcFg, srcBg, srcDeco, sx0, sy0, shift.dst.x0, shift.dst.y0, w, h);
   // Mark cache dirty
   tileCache.dirtyAll = true;
   rebuildDynamicIndex();
+  const coinReq = shift.lastCoinRequirement || 0;
+  shift.lastPlaced = { db: shift.dbFile, levelIndex, boxIndex, sx0, sy0, w, h, stepX, stepY, offx, offy, baseX, baseY, ok: true, any, srcW, srcH, coinReq };
+  try { window.EE_LastPlaced = shift.lastPlaced; } catch (e) {}
+  shift._placing = false;
 }
 
 const state = {
@@ -1133,7 +1506,17 @@ function updateHud() {
   // show eelvl stats if available
   const wi = document.getElementById('worldInfo');
   if (wi && window.eelvlStats) {
-    wi.textContent = `Tiles: ${window.eelvlStats.tiles} | Records: ${window.eelvlStats.records} | ${WORLD_W}x${WORLD_H}`;
+    let base = `Tiles: ${window.eelvlStats.tiles} | Records: ${window.eelvlStats.records} | ${WORLD_W}x${WORLD_H}`;
+    if (window.EE_ShiftDebug) {
+      const d = window.EE_ShiftDebug;
+      if (d && d.dbW && d.dbH) base += ` | DB: ${d.dbW}x${d.dbH} @ (${d.originX||0},${d.originY||0}) step ${d.stepX}x${d.stepY}`;
+    }
+    if (window.EE_LastPlaced) {
+      const lp = window.EE_LastPlaced;
+      base += ` | Box ${lp.levelIndex}:${lp.boxIndex} from (${lp.sx0},${lp.sy0}) any=${lp.any}`;
+      if (typeof lp.coinReq === 'number') base += ` | CoinReq≈${lp.coinReq}`;
+    }
+    wi.textContent = base;
   }
   const insp = document.getElementById('inspect');
   if (insp && state.inspectInfo) {
@@ -1345,7 +1728,7 @@ function loop() {
   last = now - acc;
   // SHIFT: rotate box every interval for testing
   if (shift.enabled) {
-    if (!shift.lastSwap) {
+    if (!shift.lastSwap && shift.baseReady) {
       shift.lastSwap = now;
       loadShiftDBOnce().then(()=>{ placeShiftBox(1,1); }).catch(()=>{});
     }

@@ -42,11 +42,16 @@
       <div>Gold Coins: <span id="goldCount" class="v">0</span></div>
       <div>Blue Coins: <span id="blueCount" class="v">0</span></div>
     </div>
-    <div id="left-tools">
+      <div id="left-tools">
       <div id="resetView" class="tool" title="Reset camera to default view">Reset View</div>
       <div id="togglePalette" class="tool" title="Toggle block palette (God/Edit)">Palette</div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+      <!-- Local vendored AMF3 decoder (avoid CDN MIME nosniff issues) -->
+      <script src="./lib/amf3.min.js"></script>
+      <!-- Optional fallbacks (may be blocked by nosniff; harmless if they fail) -->
+      <script src="https://cdn.jsdelivr.net/npm/amfjs@1.0.3/dist/amf.min.js"></script>
+      <script src="https://unpkg.com/amfjs@1.0.3/dist/amf.min.js"></script>
     <script type="module">
       import { Atlases, resolveSpriteForId, buildItemMap, getAllItems } from './items.js';
       import { EEBlocksIds } from './eeblocks_ids.js';
