@@ -132,6 +132,8 @@ class PlayerPhysics {
           break;
         }
       }
+      // While on a ladder, cancel gravity accelerations entirely
+      if (state.onLadder) { morx = 0; mory = 0; mox = 0; moy = 0; }
     }
     this.morx = morx; this.mory = mory;
     this.mox = mox; this.moy = moy;
@@ -139,7 +141,7 @@ class PlayerPhysics {
     // input mapping per Player.tick: restrict input to axis not aligned with delayed gravity (skip in god or on dots)
     let inH = inputH;
     let inV = inputV;
-    const zeroGrav = (state.onClimbDot || state.onClimbDelayed || state.onNoGravDotCurrent || state.onNoGravDotDelayed);
+    const zeroGrav = (state.onClimbDot || state.onClimbDelayed || state.onNoGravDotDotCurrent || state.onNoGravDotDotDelayed || state.onLadder);
     if (!state.godMode && !zeroGrav) {
       if (Math.abs(this.moy) > 0) {
         inV = 0;
@@ -154,8 +156,9 @@ class PlayerPhysics {
 
     // apply multipliers
     let sm = this.speedMultiplier;
-    // Slow/climb dot should slow movement; classic dot should NOT slow
-    if (state.onClimbCurrent || state.onClimbDelayed) sm *= 0.6; // closer to EE ladders feel
+    // Slow/climb dot should slow movement; classic dot should NOT slow.
+    // Do NOT slow for ladders (handled separately for vertical only)
+    if ((state.onClimbCurrent || state.onClimbDelayed) && !state.onLadder) sm *= 0.6;
     const gm = this.gravityMultiplier;
     const mx = this.mx * sm;
     const my = this.my * sm;
@@ -202,7 +205,7 @@ class PlayerPhysics {
   }
 
   stepPosition(collidesFn) {
-    // Re-implement sub-tile stepping preserving EE’s per-unit collision stepping order
+    // Re-implement sub-tile stepping preserving EE's per-unit collision stepping order
     let currentSX = this._speedX;
     let currentSY = this._speedY;
     let rx = this.x % 1;
@@ -314,6 +317,12 @@ function isSolidStaticId(id) {
           // Exceptions: instruments and coins are not solid
           if (id === 77 || id === 83) return false;
           if (id === 100 || id === 101 || id === 110 || id === 111) return false;
+          // Ladder should be passable
+          if (id === 120) return false;
+          // Doors and gates are handled dynamically by getDoorGateBlocking
+          if (id >= 23 && id <= 28) return false;
+          // Keys are passable
+          if (id === 6 || id === 7 || id === 8) return false;
           // Action tiles are not solid
           if (id === 1 || id === 2 || id === 3 || id === 1518 || id === 411 || id === 412 || id === 413 || id === 1519) return false;
           if (id === 4 || id === 414 || id === 459 || id === 460) return false;
@@ -327,6 +336,14 @@ function isSolidStaticId(id) {
     }
   } catch (e) { /* fallback below */ }
   // Fallback to legacy heuristic ranges
+  // Open coin door (use FG 136 sprite but treat as non-solid)
+  if (id === 136) return false;
+  // Ladder passable
+  if (id === 120) return false;
+  // Doors and gates are handled dynamically
+  if (id >= 23 && id <= 28) return false;
+  // Keys are always passable
+  if (id === 6 || id === 7 || id === 8) return false;
   if (id === 77 || id === 83) return false; // instruments
   if (id === 1 || id === 2 || id === 3 || id === 1518 || id === 411 || id === 412 || id === 413 || id === 1519) return false; // arrows
   if (id === 4 || id === 414 || id === 459 || id === 460) return false; // dots
@@ -340,8 +357,16 @@ function isSolidStaticId(id) {
 let fgMap = [];
 let bgMap = [];
 let decoMap = [];
-// Dynamic tile index for fast overlay (coins, above-layer)
-const dynamicIndex = { coins: new Set(), above: new Set() };
+// Dynamic tile index for fast overlay (coins, above-layer, doors/gates)
+const dynamicIndex = { coins: new Set(), above: new Set(), doors: new Set() };
+// Local client-only door/gate ghosting:
+// While the player is overlapping a door/gate tile, keep it non-blocking and show passable art locally
+const localDoorGhosts = new Set();
+try { window.EE_LocalGhosts = localDoorGhosts; } catch(_) {}
+// Local per-color freeze: while touching a color's door/gate, freeze ONLY that color locally
+const localFreezeUntil = { red: 0, green: 0, blue: 0 };
+function isColorFrozen(color){ return performance.now() < (localFreezeUntil[color] || 0); }
+try { window.EE_LocalFreezeColors = { red: false, green: false, blue: false }; } catch(_) {}
 function keyXY(x,y){ return `${x},${y}`; }
 function isCoinId(id){ return id===100||id===101||id===110||id===111; }
 function isAboveId(id){ return !!(window.EE_AboveIds && window.EE_AboveIds.has(id)); }
@@ -351,12 +376,14 @@ function updateDynamicAtXY(x,y){
   const idFg = (fgMap[y] && fgMap[y][x]) || 0;
   const hasCoin = isCoinId(idBg) || isCoinId(idDe) || isCoinId(idFg);
   const hasAbove = isAboveId(idBg) || isAboveId(idDe) || isAboveId(idFg);
+  const hasDoor = (idBg>=23&&idBg<=28) || (idDe>=23&&idDe<=28) || (idFg>=23&&idFg<=28);
   const k = keyXY(x,y);
   if (hasCoin) dynamicIndex.coins.add(k); else dynamicIndex.coins.delete(k);
   if (hasAbove) dynamicIndex.above.add(k); else dynamicIndex.above.delete(k);
+  if (hasDoor) dynamicIndex.doors.add(k); else dynamicIndex.doors.delete(k);
 }
 function rebuildDynamicIndex(){
-  dynamicIndex.coins.clear(); dynamicIndex.above.clear();
+  dynamicIndex.coins.clear(); dynamicIndex.above.clear(); dynamicIndex.doors.clear();
   for (let y = 0; y < WORLD_H; y++) {
     for (let x = 0; x < WORLD_W; x++) updateDynamicAtXY(x,y);
   }
@@ -404,6 +431,9 @@ function collidesAt(px, py) {
   const bottom = Math.floor((py + 15) / TILE);
   for (let y = top; y <= bottom; y++) {
     for (let x = left; x <= right; x++) {
+      // Respect local door-gate ghosting: never block inside ghosted tiles for local client
+      const k = `${x},${y}`;
+      if (!state.godMode && localDoorGhosts && localDoorGhosts.has(k)) continue;
       if (isBlockingAt(x, y)) return true;
     }
   }
@@ -413,26 +443,48 @@ function collidesAt(px, py) {
 // Dynamic blocking check: foreground solids, and doors/gates depending on key state
 function isBlockingAt(tx, ty) {
   if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) return true;
+  if (state.godMode) return false;
   const fg = (fgMap[ty] && fgMap[ty][tx]) || 0;
   if (fg && isSolidStaticId(fg)) return true;
   // Background never blocks
   // const bg = (bgMap[ty] && bgMap[ty][tx]) || 0; // intentionally ignored for blocking
   const decoId = (decoMap[ty] && decoMap[ty][tx]) || 0;
-  // Doors (solid unless key active)
-  const doorState = getDoorGateBlocking(decoId);
+  // If door/gate mistakenly placed in foreground, honor it too
+  const fgDoor = (fg >= 23 && fg <= 28) ? fg : 0;
+  const idForDoor = (decoId >= 23 && decoId <= 28) ? decoId : fgDoor;
+  // If per-color freeze is on for this color, treat that color door/gate as passable locally
+  if (idForDoor) {
+    if ((idForDoor===23||idForDoor===26) && isColorFrozen('red')) return false;
+    if ((idForDoor===24||idForDoor===27) && isColorFrozen('green')) return false;
+    if ((idForDoor===25||idForDoor===28) && isColorFrozen('blue')) return false;
+  }
+  // Doors/gates use dynamic rule; per-tile ghost handled in collidesAt, not here
+  const doorState = getDoorGateBlocking(idForDoor);
   if (doorState) return true;
   return false;
 }
 
+function isLadderId(id) { return id === 120; }
+function isLadderAt(tx, ty) {
+  const f = (fgMap[ty] && fgMap[ty][tx]) || 0;
+  const d = (decoMap[ty] && decoMap[ty][tx]) || 0;
+  const b = (bgMap[ty] && bgMap[ty][tx]) || 0;
+  return isLadderId(f) || isLadderId(d) || isLadderId(b);
+}
+
 function getDoorGateBlocking(id) {
-  // Returns true if this decoration id should block the player
-  // Red/Green/Blue
-  if (id === 23) return !isKeyActive('red');
-  if (id === 24) return !isKeyActive('green');
-  if (id === 25) return !isKeyActive('blue');
-  if (id === 26) return isKeyActive('red'); // gate blocks when key active
-  if (id === 27) return isKeyActive('green');
-  if (id === 28) return isKeyActive('blue');
+  // Dynamic rules: keys active for 5s
+  const redOn = isKeyActive('red');
+  const greenOn = isKeyActive('green');
+  const blueOn = isKeyActive('blue');
+  // Doors block when key is INACTIVE; open (passable) when key is active
+  if (id === 23) return !redOn;
+  if (id === 24) return !greenOn;
+  if (id === 25) return !blueOn;
+  // Gates block when key is ACTIVE; passable when key is inactive
+  if (id === 26) return redOn;
+  if (id === 27) return greenOn;
+  if (id === 28) return blueOn;
   // Cyan/Magenta/Yellow
   if (id === 1005) return !isKeyActive('cyan');
   if (id === 1006) return !isKeyActive('magenta');
@@ -441,6 +493,19 @@ function getDoorGateBlocking(id) {
   if (id === 1009) return isKeyActive('magenta');
   if (id === 1010) return isKeyActive('yellow');
   return false;
+}
+
+function transformDoorGateVisual(id) {
+  const ro = isKeyActive('red');
+  const go = isKeyActive('green');
+  const bo = isKeyActive('blue');
+  if (id === 23 && ro) return 26; // red door -> red gate when active
+  if (id === 26 && ro) return 23; // red gate -> red door when active
+  if (id === 24 && go) return 27; // green door -> green gate
+  if (id === 27 && go) return 24;
+  if (id === 25 && bo) return 28; // blue door -> blue gate
+  if (id === 28 && bo) return 25;
+  return id;
 }
 
 // Minimal EEO .eelvl inflater and parser
@@ -971,6 +1036,7 @@ setTimeout(()=>{
   const div = document.createElement('div');
   div.id = 'roundMsg'; div.style.position = 'fixed'; div.style.top = '8px'; div.style.left = '50%'; div.style.transform = 'translateX(-50%)';
   div.style.zIndex = '9999'; div.style.background = 'rgba(0,0,0,0.6)'; div.style.border = '1px solid #555'; div.style.borderRadius = '8px'; div.style.padding = '6px 10px'; div.style.fontSize = '14px'; div.style.color = '#fff'; div.style.pointerEvents = 'none'; div.textContent = '';
+  div.style.opacity = '0'; div.style.transition = 'opacity 200ms ease';
   document.body.appendChild(div);
 })();
 
@@ -1037,7 +1103,10 @@ let levelData = null;
 // Load the play world (EX Crew Shift [Test].eelvl) as main world; Shift will overlay boxes into its play area
 (async function loadPlayWorld(){
   try {
-    const buf = await fetch('./EX Crew Shift [Test].eelvl').then(r=>r.arrayBuffer());
+    // Prefer EX Crew Shift [Test](1).eelvl, else fallback to original
+    let resp = await fetch('./EX Crew Shift [Test](1).eelvl').catch(()=>null);
+    if (!resp || !resp.ok) resp = await fetch('./EX Crew Shift [Test].eelvl');
+    const buf = await resp.arrayBuffer();
     const bytes = new Uint8Array(buf);
     tryLoadLevelFromEELVL(bytes);
     // If header-based parser mis-sized, keep result; this file should be standard EEO and parse fine
@@ -1046,6 +1115,13 @@ let levelData = null;
     // Keep default world
   }
   try { shift.baseReady = true; } catch(_) {}
+  // Initialize player spawn to spectator spawn by default and mark not finished
+  state.p.x = 60 * TILE;
+  state.p.y = 79 * TILE;
+  shift.joinedLobby = true; shift.finished = false; shift.firstFinishTime = 0;
+  // Apply locally saved start map if present
+  const appliedLocal = tryApplyLocalStartMap();
+  if (!appliedLocal) { try { await tryApplyCustomStartMapFromDisk(); } catch(_){} }
 })();
 
 // SHIFT: DB loader and box rotator
@@ -1072,9 +1148,228 @@ let shift = {
   graceEnd: 0,
   finished: false,
   startPos: null,
+  // match state
+  playersAlive: new Set(),
+  playersFinished: new Set(),
+  nextRoundCountdownMs: 5000,
+  nextRoundAt: 0,
+  statusText: '',
+  statusUntil: 0,
+  // temporary key timers
+  keyTimers: {}, // color -> expiry timestamp
+  // lobby spawn enforcement
+  joinedLobby: false,
+  // start countdown and entrance positions
+  startCountdownMs: 5000,
+  pendingStartAt: 0,
+  entranceSpawns: new Set(),
+  clearedOutside: [],
+  coinDoorExits: new Map(),
+  didBackfillExits: false,
 };
 // Expose for debugging
 try { window.EE_Shift = shift; } catch (e) {}
+
+// Multiplayer: track remote players and basic client networking hooks
+const netPlayers = new Map(); // id -> { x,y, faceIndex, name }
+function drawNetPlayers(){
+  if (typeof Net === 'undefined') return;
+  for (const [id, pl] of netPlayers) {
+    if (!pl) continue;
+    if (smileyImg.complete) {
+      const sx = (pl.faceIndex||0) * FACE_SIZE;
+      const sy = 0;
+      const rx = Math.floor((pl.x||0) - 5);
+      const ry = Math.floor((pl.y||0) - 5);
+      ctx.drawImage(smileyImg, sx, sy, FACE_SIZE, FACE_SIZE, rx, ry, FACE_SIZE, FACE_SIZE);
+      const name = pl.name || `P${id}`;
+      if (name) {
+        ctx.save();
+        ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale, view.dpr * view.offX, view.dpr * view.offY);
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.font = '10px system-ui, Arial';
+        const tw = ctx.measureText(name).width;
+        const cx = Math.floor((pl.x||0) + 8 - tw/2);
+        const cy = Math.floor((pl.y||0) + 20 + 10);
+        ctx.fillRect(cx - 3, cy - 9, tw + 6, 12);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(name, cx, cy);
+        ctx.restore();
+      }
+    }
+  }
+}
+
+function initNetworking(){
+  if (typeof Net === 'undefined' || initNetworking._wired) return;
+  initNetworking._wired = true;
+  // Late-join full state hydration
+  Net.on('state_full', ({ shift: s, keys, doorsOpen, edits }) => {
+    shift._hydratingFromFull = true;
+    shift._pendingEdits = [];
+    (async () => {
+      try {
+        // 1) Load DB
+        if (s && typeof s.level === 'number') shift.curLevel = s.level;
+        if (s && typeof s.box === 'number') shift.curBox = s.box;
+        try { await ensureDBReady(); } catch (_) {}
+        // 2) Place box
+        if (typeof shift.curLevel === 'number' && typeof shift.curBox === 'number' && shift.dbMaps) {
+          try { placeShiftBox(shift.curLevel, shift.curBox); } catch (_) {}
+        }
+        // 3) Apply edits (snapshot and any queued during hydration)
+        const applyEdit = (e) => {
+          const tx = e.x|0, ty = e.y|0, id = e.id|0;
+          if (e.layer === 'fg') { if (fgMap[ty]) fgMap[ty][tx] = id; }
+          else if (e.layer === 'bg') { if (bgMap[ty]) bgMap[ty][tx] = id; }
+          else if (e.layer === 'de') { if (decoMap[ty]) decoMap[ty][tx] = id; }
+          if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty);
+        };
+        if (Array.isArray(edits)) { for (const e of edits) applyEdit(e); }
+        if (Array.isArray(shift._pendingEdits) && shift._pendingEdits.length) {
+          for (const e of shift._pendingEdits) applyEdit(e);
+        }
+        // 4) Rebuild caches
+        try { tileCache.dirtyAll = true; rebuildDynamicIndex(); } catch (_) {}
+        // 5) Apply keys/doors/timers
+        if (keys && typeof keys === 'object') {
+          for (const color of Object.keys(keys)) {
+            const remain = Math.max(0, (keys[color]|0) - Date.now());
+            if (!shift.keyTimers) shift.keyTimers = {};
+            shift.keyTimers[color] = performance.now() + remain;
+            if (state && state.keys) state.keys[color] = remain > 0;
+          }
+        }
+        if (doorsOpen) { try { openAllCoinDoors(); } catch (_) {} }
+        if (s && typeof s.startAtWall === 'number' && !s.goAtWall) {
+          const remain = Math.max(0, s.startAtWall - Date.now());
+          shift.pendingStartAt = performance.now() + remain;
+          shift.roundActive = false;
+          // Late join during countdown: spectate until next round
+          state.p.x = 60 * TILE; state.p.y = 79 * TILE;
+          shift.spectatorUntilNext = true;
+        }
+        if (s && s.goAtWall) {
+          // Round already in progress: spectate until next round
+          state.p.x = 60 * TILE; state.p.y = 79 * TILE;
+          shift.roundActive = true; shift.pendingStartAt = 0; shift.statusText = '';
+          shift.spectatorUntilNext = true;
+        }
+        if (s && typeof s.graceEndWall === 'number') {
+          const remainG = Math.max(0, s.graceEndWall - Date.now());
+          shift.firstFinishTime = performance.now();
+          shift.graceEnd = performance.now() + remainG;
+          shift.finished = true;
+        }
+      } finally {
+        shift._hydratingFromFull = false;
+        shift._pendingEdits = [];
+      }
+    })();
+  });
+  Net.on('join', ({ id }) => {
+    if (!netPlayers.has(id)) netPlayers.set(id, { x: 60*TILE, y: 79*TILE, faceIndex: 0, name: `P${id}` });
+    try { if (shift && shift.playersAlive) shift.playersAlive.add(id); } catch(_){ }
+  });
+  Net.on('leave', ({ id }) => { netPlayers.delete(id); try { if (shift && shift.playersAlive) shift.playersAlive.delete(id); } catch(_){ } });
+  Net.on('state', ({ from, x, y, faceIndex, name }) => {
+    if (!from) return;
+    const pl = netPlayers.get(from) || {};
+    pl.x = x|0; pl.y = y|0; pl.faceIndex = faceIndex|0; if (name) pl.name = name;
+    netPlayers.set(from, pl);
+  });
+  // Keys are global; update timers when any client triggers
+  Net.on('key', ({ color, durationMs }) => {
+    if (!color) return;
+    const dur = (durationMs|0) || 5000;
+    if (!shift.keyTimers) shift.keyTimers = {};
+    shift.keyTimers[color] = performance.now() + dur;
+    // reflect active key state for visuals
+    if (state && state.keys) state.keys[color] = true;
+  });
+  Net.on('doors', () => { try { openAllCoinDoors(); } catch(_){ } });
+  // Force start now (host pulse) to eliminate drift
+  Net.on('shift_go', () => {
+    // If this client joined mid-round or countdown, stay spectating until next round
+    if (shift && shift.spectatorUntilNext) {
+      shift.roundActive = true;
+      shift.pendingStartAt = 0; shift.statusText = '';
+      return;
+    }
+    // Teleport into play
+    let target = { x: 51, y: 75 };
+    for (const key of (shift.entranceSpawns||new Set())) { const [xs, ys] = key.split(','); target = { x: parseInt(xs,10), y: parseInt(ys,10) }; break; }
+    state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+    shift.roundActive = true;
+    shift.pendingStartAt = 0; shift.statusText = '';
+    state.coins = 0; state.blueCoins = 0;
+  });
+  // Remote edit replication
+  Net.on('edit', ({ layer, x, y, id }) => {
+    const tx = x|0, ty = y|0, vid = id|0;
+    if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) return;
+    if (shift && shift._hydratingFromFull) {
+      if (!Array.isArray(shift._pendingEdits)) shift._pendingEdits = [];
+      shift._pendingEdits.push({ layer, x: tx, y: ty, id: vid });
+      return;
+    }
+    if (layer === 'fg') { if (fgMap[ty]) fgMap[ty][tx] = vid; }
+    else if (layer === 'bg') { if (bgMap[ty]) bgMap[ty][tx] = vid; }
+    else if (layer === 'de') { if (decoMap[ty]) decoMap[ty][tx] = vid; }
+    if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty);
+  });
+  Net.on('shift_start', ({ level, box, startAtWall }) => {
+    if (typeof level === 'number') shift.curLevel = level;
+    if (typeof box === 'number') shift.curBox = box;
+    if (typeof startAtWall === 'number') {
+      const remain = Math.max(0, startAtWall - Date.now());
+      shift.pendingStartAt = performance.now() + remain;
+    }
+    // Reset round tracking for everyone
+    shift.roundActive = false;
+    // New round: spectators may join this one
+    shift.spectatorUntilNext = false;
+    shift.playersFinished = new Set();
+    shift.playersAlive = new Set(['local', ...Array.from(netPlayers.keys())]);
+    state.coins = 0; state.blueCoins = 0;
+    // Move to spectator spawn during countdown
+    state.p.x = 60 * TILE; state.p.y = 79 * TILE;
+  });
+  Net.on('shift_place', ({ level, box }) => {
+    if (typeof level === 'number') shift.curLevel = level;
+    if (typeof box === 'number') shift.curBox = box;
+    (async () => {
+      try { await ensureDBReady(); } catch (_) {}
+      try { placeShiftBox(shift.curLevel, shift.curBox); } catch (_) {}
+      try { tileCache.dirtyAll = true; rebuildDynamicIndex(); } catch (_) {}
+    })();
+  });
+  Net.on('shift_grace', ({ from, finisher, graceEndWall }) => {
+    shift.firstFinishTime = performance.now();
+    if (typeof graceEndWall === 'number') {
+      const remain = Math.max(0, graceEndWall - Date.now());
+      shift.graceEnd = performance.now() + remain;
+    } else {
+      shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
+    }
+    shift.finished = true;
+    shift.finishedName = finisher || 'Player';
+    try {
+      if (shift.playersFinished) shift.playersFinished.add(from||finisher||'peer');
+      if (shift.playersAlive && from) shift.playersAlive.delete(from);
+    } catch(_){ }
+  });
+}
+
+let lastNetSend = 0;
+function netTick(now){
+  try { initNetworking(); } catch(_){}
+  if (typeof Net === 'undefined' || !Net.id) return;
+  if (now - lastNetSend > 50) {
+    lastNetSend = now;
+    try { Net.send({ t: 'state', x: state.p.x|0, y: state.p.y|0, faceIndex: state.faceIndex|0, name: (window.state && window.state.playerName)||'Player' }); } catch(_){}
+  }
+}
 
 function openAllCoinDoors() {
   if (!shift || !shift.coinDoors || !shift.coinDoors.size) return;
@@ -1084,6 +1379,46 @@ function openAllCoinDoors() {
     if (fgMap[y]) { fgMap[y][x] = 136; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(x, y); }
   }
   shift.coinDoors.clear();
+}
+
+function fillCoinDoorExitsWithBlock16() {
+  try {
+    if (shift && shift.coinDoorExits && shift.coinDoorExits.size) {
+      for (const [k, pos] of shift.coinDoorExits) {
+        if (fgMap[pos.y]) {
+          fgMap[pos.y][pos.x] = 16;
+          if (typeof window.markDirtyTile === 'function') window.markDirtyTile(pos.x, pos.y);
+        }
+      }
+    }
+  } catch (_) {}
+  // reset tracking after refill
+  if (shift) shift.coinDoorExits = new Map();
+}
+
+function fillOldCoinDoorExitsExceptCurrent(prevExits) {
+  try {
+    if (!prevExits || prevExits.size === 0) return;
+    const current = (shift && shift.coinDoorExits) ? shift.coinDoorExits : new Map();
+    for (const [k, pos] of prevExits) {
+      if (current && current.has(k)) continue; // skip exits reused this round
+      if (fgMap[pos.y]) {
+        fgMap[pos.y][pos.x] = 16;
+        if (typeof window.markDirtyTile === 'function') window.markDirtyTile(pos.x, pos.y);
+      }
+    }
+  } catch(_) {}
+}
+
+function getEntranceSpawnFallback() {
+  // Choose an entrance tile recorded during box placement, else default (51,75)
+  if (shift && shift.entranceSpawns && shift.entranceSpawns.size) {
+    for (const key of shift.entranceSpawns) {
+      const [xs, ys] = key.split(',');
+      return { x: parseInt(xs, 10), y: parseInt(ys, 10) };
+    }
+  }
+  return { x: 51, y: 75 };
 }
 
 // Console test hooks
@@ -1099,6 +1434,9 @@ try {
 function copyShiftRegionToWorld(srcFg, srcBg, srcDeco, srcX0, srcY0, dstX0, dstY0, w, h) {
   let goldCoinsInRegion = 0;
   shift.coinDoors = new Set();
+  shift.entranceSpawns = new Set();
+  // Reset coin-door exit tracking for this placement
+  shift.coinDoorExits = new Map();
   for (let dy = 0; dy < h; dy++) {
     for (let dx = 0; dx < w; dx++) {
       const sx = srcX0 + dx;
@@ -1111,17 +1449,34 @@ function copyShiftRegionToWorld(srcFg, srcBg, srcDeco, srcX0, srcY0, dstX0, dstY
       if (fid === 100) goldCoinsInRegion++;
       if (did === 100) goldCoinsInRegion++;
       // Transformations:
-      // Remove green key doors (id 24) whether in foreground or decoration
-      if (fid === 24) fid = 0;
-      if (did === 24) did = 0;
-      // Convert red key doors (id 23) to coin doors (solid fg id 43) ONLY on the border of the destination box
+      // Remove green key doors (id 24) whether in foreground or decoration, and record entrance spawn points along border
       const onBorder = (dx === 0 || dy === 0 || dx === w - 1 || dy === h - 1);
+      if (fid === 24) { fid = 0; if (onBorder) shift.entranceSpawns.add(`${dxw},${dyw}`); }
+      if (did === 24) { did = 0; if (onBorder) shift.entranceSpawns.add(`${dxw},${dyw}`); }
+      // Convert red key doors (id 23) to coin doors (solid fg id 43) ONLY on the border of the destination box
       const hasRed = (fid === 23) || (did === 23);
       if (hasRed) {
         if (onBorder) {
           fid = 43; // place solid coin door stand-in
           did = (did === 23 ? 0 : did);
           shift.coinDoors.add(`${dxw},${dyw}`);
+          // Carve empty space (air) just outside the box behind the door to prevent players getting stuck
+          const wx = dxw, wy = dyw;
+          // Determine outward direction from the box center
+          let nx = 0, ny = 0;
+          if (dx === 0) { nx = -1; ny = 0; }
+          else if (dx === w - 1) { nx = +1; ny = 0; }
+          else if (dy === 0) { nx = 0; ny = -1; }
+          else if (dy === h - 1) { nx = 0; ny = +1; }
+          const cx = wx + nx, cy = wy + ny;
+          if (cy>=0&&cy<WORLD_H&&cx>=0&&cx<WORLD_W) {
+            // remember cleared tile so we can restore it on next round change if needed
+            shift.clearedOutside.push({ x: cx, y: cy, fg: (fgMap[cy]&&fgMap[cy][cx])||0, de: (decoMap[cy]&&decoMap[cy][cx])||0, bg: (bgMap[cy]&&bgMap[cy][cx])||0 });
+            setTileFg(cx, cy, 0);
+            setTileDeco(cx, cy, 0);
+            // Track for refill with FG 16 at grace-end, and for selective post-placement backfill
+            shift.coinDoorExits.set(`${cx},${cy}`, { x: cx, y: cy });
+          }
         } else {
           // strip internal red doors
           if (fid === 23) fid = 0;
@@ -1228,6 +1583,12 @@ async function loadShiftDBOnce() {
   }
 }
 
+async function ensureDBReady() {
+  if (shift && shift.dbMaps) return;
+  try { await loadShiftDBOnce(); } catch (_) {}
+  if (!shift || !shift.dbMaps) throw new Error('Shift DB not loaded');
+}
+
 function placeShiftBox(levelIndex, boxIndex) {
   if (!shift.dbMaps) return;
   // Guard against runaway recursion re-entry
@@ -1278,18 +1639,138 @@ function placeShiftBox(levelIndex, boxIndex) {
   shift.curCoinReq = coinReq;
   shift.lastPlaced = { db: shift.dbFile, levelIndex, boxIndex, sx0, sy0, w, h, stepX, stepY, offx, offy, baseX, baseY, ok: true, any, srcW, srcH, coinReq };
   try { window.EE_LastPlaced = shift.lastPlaced; } catch (e) {}
+  // Reset finish/grace state on new placement
+  shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
+  shift.graceEnd = 0; shift.nextRoundAt = 0; shift.statusText = '';
   shift._placing = false;
+}
+
+// Serialize current world (fg/bg/deco) for the play area into a compact JSON and persist to localStorage
+function saveCurrentMapToLocal() {
+  const area = { x0: shift.dst.x0, y0: shift.dst.y0, w: shift.boxW, h: shift.boxH };
+  const data = { meta: { area }, fg: [], bg: [], deco: [] };
+  for (let dy=0; dy<area.h; dy++) {
+    const y = area.y0 + dy;
+    const rfg = [], rbg = [], rde = [];
+    for (let dx=0; dx<area.w; dx++) {
+      const x = area.x0 + dx;
+      rfg.push((fgMap[y] && fgMap[y][x]) || 0);
+      rbg.push((bgMap[y] && bgMap[y][x]) || 0);
+      rde.push((decoMap[y] && decoMap[y][x]) || 0);
+    }
+    data.fg.push(rfg); data.bg.push(rbg); data.deco.push(rde);
+  }
+  const json = JSON.stringify(data);
+  try { localStorage.setItem('EEO_LOCAL_START_MAP', json); } catch(_){}
+  // also trigger a file download for backup
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'custom_start_map.json'; document.body.appendChild(a); a.click(); URL.revokeObjectURL(url); a.remove();
+}
+
+// If a local map exists, apply it over the play area after the base world loads
+function tryApplyLocalStartMap() {
+  let json = null;
+  try { json = localStorage.getItem('EEO_LOCAL_START_MAP'); } catch(_){}
+  if (!json) return false;
+  try {
+    const data = JSON.parse(json);
+    const { x0, y0, w, h } = data.meta.area;
+    for (let dy=0; dy<h; dy++) {
+      const y = y0 + dy;
+      for (let dx=0; dx<w; dx++) {
+        const x = x0 + dx;
+        const bid = (data.bg[dy] && data.bg[dy][dx]) || 0;
+        const did = (data.deco[dy] && data.deco[dy][dx]) || 0;
+        const fid = (data.fg[dy] && data.fg[dy][dx]) || 0;
+        setTileBg(x, y, 0); setTileDeco(x, y, 0); setTileFg(x, y, 0);
+        if (bid) setTileBg(x, y, bid);
+        if (did) setTileDeco(x, y, did);
+        if (fid) setTileFg(x, y, fid);
+      }
+    }
+    tileCache.dirtyAll = true; rebuildDynamicIndex();
+    return true;
+  } catch (_) { return false; }
+}
+
+async function tryApplyCustomStartMapFromDisk() {
+  // If no local saved map, try loading ./custom_start_map.json from the server folder
+  let json = null;
+  try {
+    const res = await fetch('./custom_start_map.json', { cache: 'no-store' });
+    if (!res.ok) return false;
+    json = await res.text();
+  } catch { return false; }
+  if (!json) return false;
+  try {
+    const data = JSON.parse(json);
+    const { x0, y0, w, h } = data.meta.area;
+    for (let dy=0; dy<h; dy++) {
+      const y = y0 + dy;
+      for (let dx=0; dx<w; dx++) {
+        const x = x0 + dx;
+        const bid = (data.bg[dy] && data.bg[dy][dx]) || 0;
+        const did = (data.deco[dy] && data.deco[dy][dx]) || 0;
+        const fid = (data.fg[dy] && data.fg[dy][dx]) || 0;
+        setTileBg(x, y, 0); setTileDeco(x, y, 0); setTileFg(x, y, 0);
+        if (bid) setTileBg(x, y, bid);
+        if (did) setTileDeco(x, y, did);
+        if (fid) setTileFg(x, y, fid);
+      }
+    }
+    tileCache.dirtyAll = true; rebuildDynamicIndex();
+    return true;
+  } catch { return false; }
+}
+
+// Export current world into a minimal .eelvl
+function exportWorldAsEELVL() {
+  const owner = 'player';
+  const worldName = 'EX Crew Shift [Test]';
+  const width = WORLD_W|0; const height = WORLD_H|0; const gravity = 1.0; const bgCol = 0xff000000;
+  const desc = 'Custom start map'; const campaign = false; const crewId=''; const crewName=''; const crewStatus=0; const minimap=true; const ownerId='made offline';
+  const parts = [];
+  const enc = new TextEncoder();
+  function push(u8){ parts.push(u8); }
+  function writeUTF(s){ const b = enc.encode(s); const len = new Uint8Array(2); new DataView(len.buffer).setUint16(0,b.length); push(len); push(b); }
+  function writeInt(n){ const b=new Uint8Array(4); new DataView(b.buffer).setInt32(0,n); push(b); }
+  function writeUInt(n){ const b=new Uint8Array(4); new DataView(b.buffer).setUint32(0,n>>>0); push(b); }
+  function writeF32(f){ const b=new Uint8Array(4); new DataView(b.buffer).setFloat32(0,f); push(b); }
+  function fromUShortArray(arr){ const out = new Uint8Array(arr.length*2); for(let i=0;i<arr.length;i++){ out[i*2]=(arr[i]>>8)&255; out[i*2+1]=arr[i]&255; } return out; }
+  // header
+  writeUTF(owner); writeUTF(worldName); writeInt(width); writeInt(height); writeF32(gravity); writeUInt(bgCol);
+  writeUTF(desc); push(new Uint8Array([campaign?1:0])); writeUTF(crewId); writeUTF(crewName); writeInt(crewStatus); push(new Uint8Array([minimap?1:0])); writeUTF(ownerId);
+  // collect tiles per (id,layer)
+  const map = new Map();
+  const add = (id,layer,x,y)=>{ const k=`${id}|${layer}`; let r=map.get(k); if(!r){ r={id,layer,xs:[],ys:[]}; map.set(k,r);} r.xs.push(x); r.ys.push(y); };
+  for (let y=0;y<WORLD_H;y++){
+    for (let x=0;x<WORLD_W;x++){
+      const b=(bgMap[y]&&bgMap[y][x])||0, d=(decoMap[y]&&decoMap[y][x])||0, f=(fgMap[y]&&fgMap[y][x])||0;
+      if (f) add(f,0,x,y); if (b) add(b,1,x,y); if (d) add(d,2,x,y);
+    }
+  }
+  for (const r of map.values()){
+    writeInt(r.id); writeInt(r.layer);
+    const xb=fromUShortArray(r.xs); writeUInt(xb.length); push(xb);
+    const yb=fromUShortArray(r.ys); writeUInt(yb.length); push(yb);
+  }
+  // combine + deflate
+  let total=0; for(const p of parts) total+=p.length; const raw=new Uint8Array(total); let off=0; for(const p of parts){ raw.set(p,off); off+=p.length; }
+  const out = (window.pako && pako.deflate) ? pako.deflate(raw) : raw;
+  const blob=new Blob([out],{type:'application/octet-stream'});
+  const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='EX Crew Shift [Test].eelvl'; document.body.appendChild(a); a.click(); URL.revokeObjectURL(url); a.remove();
 }
 
 const state = {
   p: new PlayerPhysics(),
   input: { left: false, right: false, up: false, down: false, jump: false, jumpJP: false, hPri: 0, vPri: 0 },
-  faceIndex: 0, // frame index (26px step in EE, we’ll draw 26x26 as in Player.rect2)
+  faceIndex: 0, // frame index (26px step in EE, we'll draw 26x26 as in Player.rect2)
   goldBorder: false,
   godMode: false,
   canEdit: true,
   autoTrack: false,
-  trackPlayer: false,
+  trackPlayer: true,
   auraAnim: { start: 0, playedIntro: false, loopStart: 0 },
   keys: { red: false, green: false, blue: false, cyan: false, magenta: false, yellow: false },
   coins: 0,
@@ -1465,8 +1946,9 @@ function drawWorld() {
       const key = k; if (visited.has(key)) return; visited.add(key);
       window.EE_DrawOverlay(ctx, x, y);
     };
-    // Iterate coins then above; sets are typically sparse
+    // Iterate coins, doors, then above; sets are typically sparse
     for (const k of dynamicIndex.coins) drawIfVisible(k);
+    for (const k of dynamicIndex.doors) drawIfVisible(k);
     for (const k of dynamicIndex.above) drawIfVisible(k);
   }
   // Render coin door labels (remaining coins) at border tiles
@@ -1496,12 +1978,32 @@ function drawWorld() {
   }
   // Round banner text
   const msgEl = document.getElementById('roundMsg');
+  const rhEl = document.getElementById('roundHud');
   if (msgEl) {
-    if (shift && shift.firstFinishTime) {
+    if (shift && shift.pendingStartAt) {
+      const remain0 = Math.max(0, Math.ceil((shift.pendingStartAt - nowMs) / 1000));
+      msgEl.textContent = `Starting in ${remain0}`;
+      msgEl.style.display = 'block'; msgEl.style.opacity = '1';
+    } else if (shift && shift.firstFinishTime) {
       const remain = Math.max(0, Math.ceil((shift.graceEnd - nowMs) / 1000));
       msgEl.textContent = `${shift.finishedName || 'Player'} finished! ${remain}s left! (Need ${shift.curCoinReq||0} gold)`;
-      msgEl.style.display = 'block';
-    } else msgEl.style.display = '';
+      msgEl.style.display = 'block'; msgEl.style.opacity = '1';
+    } else if (shift && shift.nextRoundAt) {
+      const remain2 = Math.max(0, Math.ceil((shift.nextRoundAt - nowMs) / 1000));
+      msgEl.textContent = `Next round in ${remain2}`;
+      msgEl.style.display = 'block'; msgEl.style.opacity = '1';
+    } else if (shift && shift.statusText) {
+      msgEl.textContent = shift.statusText; msgEl.style.display = 'block'; msgEl.style.opacity = '1';
+    } else { msgEl.style.opacity = '0'; setTimeout(()=>{ msgEl.style.display = ''; msgEl.textContent = ''; }, 250); }
+  }
+  if (rhEl) {
+    const diff = shift && shift.curLevel ? shift.curLevel : 0;
+    const lvl = shift && shift.curBox ? shift.curBox : 0;
+    const parts = [];
+    if (shift && shift.roundActive && diff) parts.push(`Difficulty ${diff}`);
+    if (shift && shift.roundActive && lvl) parts.push(`Level ${lvl}`);
+    rhEl.textContent = parts.join(' • ');
+    rhEl.style.display = parts.length ? 'block' : '';
   }
   // Optionally overlay action-only deco (e.g., arrows) debugging layer
   // for (let y = 0; y < WORLD_H; y++) { for (let x = 0; x < WORLD_W; x++) { window.EE_DrawTileFrom(ctx, x, y, decoMap); } }
@@ -1624,6 +2126,9 @@ function updateHud() {
       const d = window.EE_ShiftDebug;
       if (d && d.dbW && d.dbH) base += ` | DB: ${d.dbW}x${d.dbH} @ (${d.originX||0},${d.originY||0}) step ${d.stepX}x${d.stepY}`;
     }
+    if (shift && shift.roundActive && shift.curLevel) {
+      base += ` | Level ${shift.curLevel}`;
+    }
     if (window.EE_LastPlaced) {
       const lp = window.EE_LastPlaced;
       base += ` | Box ${lp.levelIndex}:${lp.boxIndex} from (${lp.sx0},${lp.sy0}) any=${lp.any}`;
@@ -1661,6 +2166,103 @@ function tick() {
   const top = Math.floor(state.p.y / TILE);
   const right = Math.floor((state.p.x + 15) / TILE);
   const bottom = Math.floor((state.p.y + 15) / TILE);
+  // Maintain a local freeze flag if touching any door/gate; cleared when fully out
+  (function updateLocalColorFreeze(){
+    if (state.godMode) { localFreezeUntil.red=localFreezeUntil.green=localFreezeUntil.blue=0; return; }
+    const minTx = Math.max(0, left), minTy = Math.max(0, top);
+    const maxTx = Math.min(WORLD_W - 1, right), maxTy = Math.min(WORLD_H - 1, bottom);
+    const touching = { red: false, green: false, blue: false };
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        const decoId = (decoMap[ty] && decoMap[ty][tx]) || 0;
+        const fgId = (fgMap[ty] && fgMap[ty][tx]) || 0;
+        const doorId = (decoId >= 23 && decoId <= 28) ? decoId : (fgId >= 23 && fgId <= 28 ? fgId : 0);
+        if (!doorId) continue;
+        if (doorId === 23 || doorId === 26) touching.red = true;
+        if (doorId === 24 || doorId === 27) touching.green = true;
+        if (doorId === 25 || doorId === 28) touching.blue = true;
+      }
+    }
+    // Instantly clear per-color freeze when not touching
+    const now = performance.now();
+    localFreezeUntil.red = touching.red ? now + 1 : 0;
+    localFreezeUntil.green = touching.green ? now + 1 : 0;
+    localFreezeUntil.blue = touching.blue ? now + 1 : 0;
+    try { window.EE_LocalFreezeColors = { red: isColorFrozen('red'), green: isColorFrozen('green'), blue: isColorFrozen('blue') }; } catch(_) {}
+  })();
+  // If a gate turned back into a door while player is inside, resolve overlap immediately
+  (function resolveDoorGateOverlap(){
+    if (state.godMode) return;
+    let px = state.p.x, py = state.p.y;
+    const minTx = Math.max(0, left), minTy = Math.max(0, top);
+    const maxTx = Math.min(WORLD_W - 1, right), maxTy = Math.min(WORLD_H - 1, bottom);
+    let bestAxis = null; let bestDelta = Infinity; let bestAdjust = 0;
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        const decoId = (decoMap[ty] && decoMap[ty][tx]) || 0;
+        const fgId = (fgMap[ty] && fgMap[ty][tx]) || 0;
+        const doorId = (decoId >= 23 && decoId <= 28) ? decoId : (fgId >= 23 && fgId <= 28 ? fgId : 0);
+        if (!doorId) continue;
+        // God mode ignores all collisions
+        if (state.godMode) continue;
+        // If tile is locally ghosted, keep it passable and draw gate
+        const key = `${tx},${ty}`;
+        const currentlyBlocks = getDoorGateBlocking(doorId);
+        // Keep passable for the color while frozen
+        if ((doorId===23||doorId===26) && isColorFrozen('red')) continue;
+        if ((doorId===24||doorId===27) && isColorFrozen('green')) continue;
+        if ((doorId===25||doorId===28) && isColorFrozen('blue')) continue;
+        if (!currentlyBlocks) {
+          localDoorGhosts.add(key);
+          continue;
+        }
+        // If it just became blocking while we're overlapping, keep it ghosted until we exit
+        if (!localDoorGhosts.has(key)) { localDoorGhosts.add(key); continue; }
+        // Tile rect
+        const rx0 = tx * TILE, ry0 = ty * TILE, rx1 = rx0 + 16, ry1 = ry0 + 16;
+        const px0 = px, py0 = py, px1 = px + 15, py1 = py + 15;
+        const overlap = !(px1 < rx0 || py1 < ry0 || px0 > rx1 || py0 > ry1);
+        if (!overlap) continue;
+        // Compute minimal push out
+        const pushLeft = Math.max(0, px1 - rx0 + 0.001);
+        const pushRight = Math.max(0, rx1 - px0 + 0.001);
+        const pushUp = Math.max(0, py1 - ry0 + 0.001);
+        const pushDown = Math.max(0, ry1 - py0 + 0.001);
+        // choose smallest axis push
+        const candidates = [
+          { axis: 'x-', d: pushLeft, dx: -pushLeft, dy: 0 },
+          { axis: 'x+', d: pushRight, dx: +pushRight, dy: 0 },
+          { axis: 'y-', d: pushUp, dx: 0, dy: -pushUp },
+          { axis: 'y+', d: pushDown, dx: 0, dy: +pushDown },
+        ];
+        for (const c of candidates) {
+          if (c.d > 0 && c.d < bestDelta) { bestDelta = c.d; bestAxis = c.axis; bestAdjust = c.axis[0] === 'x' ? c.dx : c.dy; }
+        }
+      }
+    }
+    if (bestAxis) {
+      if (bestAxis[0] === 'x') {
+        state.p.x += bestAdjust;
+        state.p._speedX = 0;
+      } else {
+        state.p.y += bestAdjust;
+        state.p._speedY = 0;
+      }
+    }
+  })();
+  // Clear local ghosts the moment player fully leaves the tile
+  (function clearExitedGhosts(){
+    if (!localDoorGhosts.size) return;
+    const minTx = Math.max(0, left), minTy = Math.max(0, top);
+    const maxTx = Math.min(WORLD_W - 1, right), maxTy = Math.min(WORLD_H - 1, bottom);
+    const touching = new Set();
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) touching.add(`${tx},${ty}`);
+    }
+    for (const k of Array.from(localDoorGhosts)) {
+      if (!touching.has(k)) localDoorGhosts.delete(k);
+    }
+  })();
   function handleActionId(id) {
     if (!id) return;
     // Gravity arrows (visible and invisible)
@@ -1673,10 +2275,10 @@ function tick() {
     // Slow/climb dots (visible + invisible)
     if (id === 459 || id === 460) state.onClimbCurrent = true;
     // Boost tiles handled exactly like EE later for current (center) tile only
-    // Keys
-    if (id === 6) state.keys.red = true;
-    if (id === 7) state.keys.green = true;
-    if (id === 8) state.keys.blue = true;
+    // Keys: trigger timed global key for 5s
+    if (id === 6) { triggerKeyTimer('red'); state.keys.red = true; try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'key', color:'red', durationMs:5000 }); } catch(_){} }
+    if (id === 7) { triggerKeyTimer('green'); state.keys.green = true; try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'key', color:'green', durationMs:5000 }); } catch(_){} }
+    if (id === 8) { triggerKeyTimer('blue'); state.keys.blue = true; try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'key', color:'blue', durationMs:5000 }); } catch(_){} }
     if (id === 189) state.keys.cyan = true;
     if (id === 190) state.keys.magenta = true;
     if (id === 191) state.keys.yellow = true;
@@ -1709,9 +2311,11 @@ function tick() {
       if (typeof window.markDirtyTile === 'function') window.markDirtyTile(cx, cy);
       // play EE coin sfx if available
       if (typeof window.playCoinSfx === 'function') window.playCoinSfx();
+      // coin pickups are LOCAL per player; do not broadcast
       // If requirement met, open all coin doors immediately
       if (shift && shift.roundActive && (state.coins|0) >= (shift.curCoinReq||0)) {
         openAllCoinDoors();
+        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'doors' }); } catch(_){}
       }
       // If inside play box and coin requirement met, mark finish when touching red-door stand-in
       if (shift && shift.roundActive) {
@@ -1735,6 +2339,10 @@ function tick() {
               shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
               shift.finished = true;
               shift.finishedName = (window.state && window.state.playerName) || 'Player';
+              // broadcast grace start to peers (use wall clock for sync)
+              try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){}
+              // Teleport finisher immediately to winner staging area
+              state.p.x = 51 * TILE; state.p.y = 75 * TILE;
             }
           }
         }
@@ -1743,6 +2351,27 @@ function tick() {
   }
   const centerDeco = (decoMap[cy] && decoMap[cy][cx]) || 0;
   const centerFg = (fgMap[cy] && fgMap[cy][cx]) || 0;
+  // Detect ladder contact anywhere in the player's AABB, not only center
+  let touchingLadder = false;
+  for (let ty = top; ty <= bottom && !touchingLadder; ty++) {
+    for (let tx = left; tx <= right; tx++) {
+      if (isLadderAt(tx, ty)) { touchingLadder = true; break; }
+    }
+  }
+  state.onLadder = !!touchingLadder;
+  // If coins requirement met and player exits the box (avoid false start when CoinReq==0)
+  if (shift && shift.roundActive && (shift.curCoinReq||0) > 0 && (state.coins|0) >= (shift.curCoinReq||0) && !shift.firstFinishTime) {
+    const inside = (cx >= shift.dst.x0 && cx <= shift.dst.x1 && cy >= shift.dst.y0 && cy <= shift.dst.y1);
+    if (!inside) {
+      openAllCoinDoors();
+      shift.firstFinishTime = performance.now();
+      shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
+      shift.finished = true;
+      shift.finishedName = (window.state && window.state.playerName) || 'Player';
+      try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){}
+      state.p.x = 51 * TILE; state.p.y = 75 * TILE;
+    }
+  }
   const isArrow = (id)=>id===1||id===2||id===3||id===1518||id===411||id===412||id===413||id===1519;
   const isSlowDot = (id)=>id===459||id===460;
   const isClassicDot = (id)=>id===4||id===414;
@@ -1768,6 +2397,10 @@ function tick() {
   }
   // combine for zero-gravity condition (recomputed from center-based flags)
   state.onClimbDot = (state.onClimbCurrent || state.onNoGravDotCurrent);
+  // Ladder handling flag only; movement override applied after applyForces
+  if (state.onLadder && !state.godMode) {
+    state.onClimbCurrent = true;
+  }
   // Arrow stack count along arrow line (both directions from center)
   function arrowDir(id){
     if (id===1||id===411) return {dx:-1,dy:0};
@@ -1803,6 +2436,27 @@ function tick() {
   state.currentArrowStack = arrowStack;
   // No dwell scaling; keep counters removed for clarity
   state.p.applyForces(inpH, inpV);
+  // Ladder post-force correction so gravity cannot pull player down when idle
+  if (!state.godMode) {
+    if (state.onLadder) {
+      const climbSpeed = 1.2;
+      const wantUp = (state.input.vPri < 0);
+      const wantDown = (state.input.vPri > 0);
+      // Cancel gravity while on ladder (already removed in applyForces; keep here for safety)
+      state.p._modifierY = 0;
+      if (wantUp) {
+        state.p._speedY = -climbSpeed;
+      } else if (wantDown) {
+        state.p._speedY = +climbSpeed;
+      } else {
+        // No input: smoothly decelerate existing vertical velocity (no instant stop)
+        state.p._speedY *= 0.85;
+        if (Math.abs(state.p._speedY) < 0.02) state.p._speedY = 0;
+      }
+      // Slight horizontal damping while on ladder (decelerate if you entered fast)
+      state.p._speedX *= 0.9;
+    }
+  }
   // Apply boosts exactly like EE: based on current center tile only, set speed directly
   if (!state.godMode) {
     const boostIds = new Set([114,115,116,117]);
@@ -1848,12 +2502,22 @@ function tick() {
 }
 
 function isKeyActive(color) {
-  return !!state.keys[color];
+  // Global timed keys (R/G/B); other colors may use state flags
+  const timedOn = (shift && shift.keyTimers && shift.keyTimers[color] && performance.now() < shift.keyTimers[color]);
+  if (color === 'red' || color === 'green' || color === 'blue') return !!timedOn;
+  return !!state.keys[color] || !!timedOn;
+}
+window.isKeyActive = isKeyActive;
+
+function triggerKeyTimer(color, durationMs = 5000) {
+  if (!shift.keyTimers) shift.keyTimers = {};
+  shift.keyTimers[color] = performance.now() + durationMs;
 }
 
 function draw() {
   drawWorld();
   drawPlayer();
+  try { drawNetPlayers(); } catch(_){}
   updateHud();
 }
 
@@ -1871,36 +2535,121 @@ function loop() {
     acc -= Config.physics_ms_per_tick;
   }
   last = now - acc;
+  // send network updates
+  try { netTick(now); } catch(_){}
   // SHIFT: rotate box every interval for testing
   if (shift.enabled) {
+    // Handle start countdown -> teleport to entrance and start the round
+    if (shift.pendingStartAt) {
+      const nowp = now;
+      if (nowp >= shift.pendingStartAt) {
+        // Teleport all players (local) to any recorded entrance spawn; fallback to (51,75)
+        let target = { x: 51, y: 75 };
+        for (const key of (shift.entranceSpawns||new Set())) { const [xs, ys] = key.split(','); target = { x: parseInt(xs,10), y: parseInt(ys,10) }; break; }
+        state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+        shift.roundActive = true;
+        shift.pendingStartAt = 0; shift.statusText = '';
+        state.coins = 0; state.blueCoins = 0;
+        // Host sends GO to ensure instant sync across peers
+        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_go' }); } catch(_){}
+      }
+    }
     if (!shift.lastSwap && shift.baseReady) {
       shift.lastSwap = now;
-      loadShiftDBOnce().then(()=>{ placeShiftBox(1,1); }).catch(()=>{});
-      shift.roundActive = true; shift.firstFinishTime = 0; shift.finishedName = '';
+      // Do not auto-start. Only preload DBs; placement happens on Start button.
+      loadShiftDBOnce().catch(()=>{});
+      shift.roundActive = false; shift.firstFinishTime = 0; shift.finishedName = '';
+      shift.playersAlive = new Set();
+      shift.playersFinished.clear();
+      state.p.x = 60 * TILE; state.p.y = 79 * TILE;
     }
-    if (now - shift.lastSwap > shift.intervalMs && !shift.swapping) {
-      shift.swapping = true;
-      const nextBox = ((shift.curBox) % 12) + 1; // 1..12
-      const nextLevel = shift.curLevel; // keep difficulty for test
-      placeShiftBox(nextLevel, nextBox);
-      shift.curBox = nextBox;
-      shift.lastSwap = now;
-      shift.swapping = false;
-    }
+    // disable the old 10s rotation demo
     // If grace running and timer expired, advance difficulty (placeholder) and respawn player
     if (shift.firstFinishTime && now >= shift.graceEnd) {
       // Increase difficulty/box for demo: increment level cycling 1..7, reset box to 1
-      shift.curLevel = ((shift.curLevel) % 7) + 1;
-      shift.curBox = 1;
-      placeShiftBox(shift.curLevel, shift.curBox);
-      // Teleport player to start (top-left inside play box)
-      state.p.x = (shift.dst.x0 + 1) * TILE;
-      state.p.y = (shift.dst.y0 + 1) * TILE;
-      state.coins = 0; state.blueCoins = 0;
-      // ensure doors are closed for new box
-      // (coin doors set up during placement; nothing else to do here)
-      shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
-      shift.lastSwap = now;
+      // Start countdown "next round in 5..1" and teleport winners to start
+      if (!shift.nextRoundAt) {
+        shift.nextRoundAt = now + shift.nextRoundCountdownMs;
+        // Round just ended: backfill coin-door exits immediately at grace end
+        const prevExitsEnd = new Map(shift.coinDoorExits || []);
+        fillCoinDoorExitsWithBlock16();
+        // preserve the snapshot for after placement as well
+        shift._prevRoundExits = prevExitsEnd;
+      }
+      const remain = Math.max(0, Math.ceil((shift.nextRoundAt - now) / 1000));
+      shift.statusText = remain > 0 ? `Next round in ${remain}` : '';
+      if (now >= shift.nextRoundAt) {
+        // eliminate non-finishers (local logic)
+        if (!shift.finished) {
+          // local player loses
+          state.p.x = 60 * TILE; state.p.y = 79 * TILE; // lose spawn
+          shift.statusText = 'You lose!';
+          shift.playersAlive.delete('local');
+        }
+        // Check if one player remaining
+        if (shift.playersAlive.size <= 1) {
+          // Single-player: advance difficulty instead of resetting to 1
+          shift.curLevel = Math.min(7, shift.curLevel + 1);
+          {
+            let nb;
+            do { nb = Math.floor(Math.random()*12) + 1; } while (nb === shift.curBox);
+            shift.curBox = nb;
+          }
+          // restore any previously cleared outside tiles before placing new box
+          try {
+            if (shift.clearedOutside && shift.clearedOutside.length) {
+              for (const t of shift.clearedOutside) {
+                if (fgMap[t.y]) fgMap[t.y][t.x] = t.fg||0;
+                if (decoMap[t.y]) decoMap[t.y][t.x] = t.de||0;
+              }
+              shift.clearedOutside = [];
+              tileCache.dirtyAll = true;
+            }
+          } catch(_){}
+          // At placement time, we already backfilled at grace end; avoid double
+          placeShiftBox(shift.curLevel, shift.curBox);
+          try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox }); } catch(_){}
+          // If a snapshot exists, selectively backfill only those not reused by new box
+          if (shift._prevRoundExits) { fillOldCoinDoorExitsExceptCurrent(shift._prevRoundExits); shift._prevRoundExits = null; }
+          const ent = getEntranceSpawnFallback();
+          state.p.x = ent.x * TILE; state.p.y = ent.y * TILE;
+          shift.playersAlive = new Set(['local']);
+          shift.playersFinished.clear();
+          shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
+          shift.graceEnd = 0; shift.nextRoundAt = 0; shift.statusText = '';
+          shift.lastSwap = now;
+        } else {
+          // Advance to next level; randomly pick a box 1..12, place new box, then teleport
+          shift.curLevel = Math.min(7, shift.curLevel + 1);
+          {
+            let nb2;
+            do { nb2 = Math.floor(Math.random()*12) + 1; } while (nb2 === shift.curBox);
+            shift.curBox = nb2;
+          }
+          // restore any previously cleared outside tiles before placing new box
+          try {
+            if (shift.clearedOutside && shift.clearedOutside.length) {
+              for (const t of shift.clearedOutside) {
+                if (fgMap[t.y]) fgMap[t.y][t.x] = t.fg||0;
+                if (decoMap[t.y]) decoMap[t.y][t.x] = t.de||0;
+              }
+              shift.clearedOutside = [];
+              tileCache.dirtyAll = true;
+            }
+          } catch(_){}
+          // At placement time, we already backfilled at grace end; avoid double
+          placeShiftBox(shift.curLevel, shift.curBox);
+          try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox }); } catch(_){}
+          if (shift._prevRoundExits) { fillOldCoinDoorExitsExceptCurrent(shift._prevRoundExits); shift._prevRoundExits = null; }
+          const ent2 = getEntranceSpawnFallback();
+          state.p.x = ent2.x * TILE; state.p.y = ent2.y * TILE;
+          state.coins = 0; state.blueCoins = 0;
+          // Reset round flags
+          shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
+          shift.graceEnd = 0; shift.nextRoundAt = 0; shift.statusText = '';
+          shift.lastSwap = now;
+        }
+      }
     }
   }
   // Smooth zoom step (avoid using now-last; use a fixed interpolation for stability)
@@ -1989,6 +2738,14 @@ addEventListener('keydown', (e) => {
   if (e.key === '[') state.p.maxJumps = Math.max(1, state.p.maxJumps - 1);
   if (e.key === ']') state.p.maxJumps = Math.min(10, state.p.maxJumps + 1);
   if (e.key >= '1' && e.key <= '9') state.faceIndex = (parseInt(e.key, 10) - 1);
+  // Timed key toggles (simulate EE key effects): R/G/B/C/M/Y open for 5 seconds
+  const keyMap = { 'r': 'red', 'g': 'green', 'b': 'blue', 'c': 'cyan', 'm': 'magenta', 'y': 'yellow', 'R': 'red', 'G': 'green', 'B': 'blue', 'C': 'cyan', 'M': 'magenta', 'Y': 'yellow' };
+  if (keyMap[e.key]) {
+    const color = keyMap[e.key];
+    const now = performance.now();
+    const duration = 5000; // ms open time
+    shift.keyTimers[color] = now + duration;
+  }
 });
 addEventListener('keyup', (e) => {
   preventIfHandled(e);
@@ -2068,6 +2825,52 @@ if (resetBtn) {
     view.offY = Math.floor((view.cssH - WORLD_H * TILE * view.scale) / 2);
   });
 }
+
+// Start game button
+const startBtn = document.getElementById('startGame');
+if (startBtn) {
+  startBtn.addEventListener('click', async () => {
+    try {
+      // Ensure DBs are loaded
+      await loadShiftDBOnce();
+      // Refill any coin-door exit spaces with solid block 16
+      
+      // Prepare round at level 1 with random box but do not teleport yet
+      shift.curLevel = 1;
+      {
+        let nb3;
+        do { nb3 = Math.floor(Math.random()*12) + 1; } while (nb3 === shift.curBox);
+        shift.curBox = nb3;
+      }
+      placeShiftBox(shift.curLevel, shift.curBox);
+      // Countdown start (5s). Broadcast using wall-clock to avoid drift.
+      const startAtWall = Date.now() + (shift.startCountdownMs||5000);
+      shift.pendingStartAt = performance.now() + (shift.startCountdownMs||5000);
+      // announce placement and countdown start to peers (host-first, wall clock)
+      try {
+        if (typeof Net !== 'undefined' && Net.id) {
+          Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox });
+          Net.send({ t: 'shift_start', level: shift.curLevel, box: shift.curBox, startAtWall });
+          setTimeout(() => { try { Net.send({ t: 'shift_go' }); } catch(_){} }, (shift.startCountdownMs||5000));
+        }
+      } catch(_){}
+      shift.statusText = 'Starting in 5';
+      shift.roundActive = false; shift.firstFinishTime = 0; shift.finishedName = '';
+      shift.playersAlive = new Set(['local']);
+      shift.playersFinished.clear();
+      state.coins = 0; state.blueCoins = 0;
+      // Stay at spectator spawn during countdown
+      state.p.x = 60 * TILE; state.p.y = 79 * TILE;
+    } catch (_) {}
+  });
+}
+// Save map / Clear local map buttons
+const saveMapBtn = document.getElementById('saveMap');
+if (saveMapBtn) saveMapBtn.addEventListener('click', () => { try { saveCurrentMapToLocal(); } catch(_){} });
+const clearMapBtn = document.getElementById('clearLocalMap');
+if (clearMapBtn) clearMapBtn.addEventListener('click', () => { try { localStorage.removeItem('EEO_LOCAL_START_MAP'); } catch(_){} });
+const exportBtn = document.getElementById('exportEELVL');
+if (exportBtn) exportBtn.addEventListener('click', () => { try { exportWorldAsEELVL(); } catch(_){} });
 
 // Mouse for editing
 const mouse = { x: 0, y: 0, tile: null, down: false, pan: false, panStartX: 0, panStartY: 0, offStartX: 0, offStartY: 0, strokeKeys: new Set(), strokeMode: 'place', strokeBrush: null, strokeLayer: 'auto' };
@@ -2157,33 +2960,31 @@ function applyEdit() {
   const forced = mouse.strokeLayer || ((window.layerSelect && window.layerSelect.value) || 'auto');
   if (mouse.strokeMode === 'remove') {
     if (forced === 'foreground') {
-      if (fgMap[ty]) { fgMap[ty][tx] = 0; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); }
+      if (fgMap[ty]) { fgMap[ty][tx] = 0; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'fg', x:tx, y:ty, id:0 }); } catch(_){} }
     } else if (forced === 'background') {
-      if (bgMap[ty]) { bgMap[ty][tx] = 0; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); }
+      if (bgMap[ty]) { bgMap[ty][tx] = 0; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'bg', x:tx, y:ty, id:0 }); } catch(_){} }
     } else if (forced === 'auto') {
       let changed = false;
-      if (fgMap[ty] && fgMap[ty][tx] === brush) { fgMap[ty][tx] = 0; changed = true; }
-      if (decoMap[ty] && decoMap[ty][tx] === brush) { decoMap[ty][tx] = 0; changed = true; }
-      if (bgMap[ty] && bgMap[ty][tx] === brush) { bgMap[ty][tx] = 0; changed = true; }
+      if (fgMap[ty] && fgMap[ty][tx] === brush) { fgMap[ty][tx] = 0; try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'fg', x:tx, y:ty, id:0 }); } catch(_){} changed = true; }
+      if (decoMap[ty] && decoMap[ty][tx] === brush) { decoMap[ty][tx] = 0; try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'de', x:tx, y:ty, id:0 }); } catch(_){} changed = true; }
+      if (bgMap[ty] && bgMap[ty][tx] === brush) { bgMap[ty][tx] = 0; try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'bg', x:tx, y:ty, id:0 }); } catch(_){} changed = true; }
       if (changed && typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty);
     } else {
-      if (decoMap[ty]) { decoMap[ty][tx] = 0; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); }
+      if (decoMap[ty]) { decoMap[ty][tx] = 0; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'de', x:tx, y:ty, id:0 }); } catch(_){} }
     }
     return;
   }
   // place
   if (forced === 'foreground' || (forced === 'auto' && isSolidStaticId(brush))) {
-    if (fgMap[ty]) { fgMap[ty][tx] = brush; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); }
+    if (fgMap[ty]) { fgMap[ty][tx] = brush; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'fg', x:tx, y:ty, id:brush }); } catch(_){} }
   } else if (forced === 'background') {
-    if (bgMap[ty]) { bgMap[ty][tx] = brush; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); }
+    if (bgMap[ty]) { bgMap[ty][tx] = brush; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'bg', x:tx, y:ty, id:brush }); } catch(_){} }
   } else {
-    if (decoMap[ty]) { decoMap[ty][tx] = brush; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); }
+    if (decoMap[ty]) { decoMap[ty][tx] = brush; if (typeof window.markDirtyTile === 'function') window.markDirtyTile(tx, ty); try { if (typeof Net!=='undefined'&&Net.id) Net.send({ t:'edit', layer:'de', x:tx, y:ty, id:brush }); } catch(_){} }
   }
 }
 
-// initialize position and start loop immediately (do not depend on image load)
-state.p.x = 3 * TILE;
-state.p.y = 2 * TILE;
+// initialize loop immediately (position set during world load)
 loop();
 
 

@@ -36,15 +36,30 @@
       <div id="inspect" class="row"></div>
       <div>Gravity dir: <span id="gdir" class="v">down</span> | Jumps: <span id="jinfo" class="v">1</span></div>
     </div>
+    <!-- Round info HUD -->
+    <div id="roundHud" style="position: fixed; top: 36px; left: 50%; transform: translateX(-50%); z-index: 9999; pointer-events: none; background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 8px; font-size: 13px; line-height: 1.4; color: #fff;"></div>
     <canvas id="canvas" width="640" height="500"></canvas>
     <!-- Top-right coin HUD -->
     <div id="coinHud" style="position: fixed; top: 8px; right: 8px; z-index: 9999; pointer-events: none; background: rgba(0,0,0,.4); padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.4;">
       <div>Gold Coins: <span id="goldCount" class="v">0</span></div>
       <div>Blue Coins: <span id="blueCount" class="v">0</span></div>
     </div>
+      <!-- Multiplayer UI -->
+      <div id="netHud" style="position: fixed; bottom: 8px; left: 8px; z-index: 9999; background: rgba(0,0,0,.4); padding: 6px 8px; border-radius: 8px; font-size: 12px; line-height: 1.4; color: #fff;">
+        <div style="display:flex; gap:6px; align-items:center;">
+          <label>Room:</label>
+          <input id="roomInput" value="lobby" style="width:120px; background:#222; color:#eee; border:1px solid #555; border-radius:4px; padding:2px 4px;">
+          <button id="connectBtn" style="background:#2d6; color:#fff; border:1px solid #285; border-radius:6px; padding:4px 8px; cursor:pointer;">Connect</button>
+          <span id="netStatus" style="margin-left:6px; color:#bbb;">offline</span>
+        </div>
+      </div>
       <div id="left-tools">
       <div id="resetView" class="tool" title="Reset camera to default view">Reset View</div>
       <div id="togglePalette" class="tool" title="Toggle block palette (God/Edit)">Palette</div>
+        <div id="startGame" class="tool" title="Start Shift Game">Start Game</div>
+        <div id="saveMap" class="tool" title="Save current play map to browser and download">Save Map</div>
+        <div id="clearLocalMap" class="tool" title="Clear saved map from browser">Clear Local Map</div>
+        <div id="exportEELVL" class="tool" title="Export full world as .eelvl">Export .eelvl</div>
     </div>
       <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
       <!-- Local vendored AMF3 decoder (avoid CDN MIME nosniff issues) -->
@@ -121,6 +136,15 @@
         if (!window.fgMap) return;
         const drawLayer = (id) => {
           if (!id) return;
+          // Doors/gates: swap art based on global key state to visually match pass/block logic
+          if (!window.EE_CacheBuild) {
+            const ro = window.isKeyActive && window.isKeyActive('red');
+            const go = window.isKeyActive && window.isKeyActive('green');
+            const bo = window.isKeyActive && window.isKeyActive('blue');
+            if (ro && id === 23) id = 26; else if (ro && id === 26) id = 23;
+            if (go && id === 24) id = 27; else if (go && id === 27) id = 24;
+            if (bo && id === 25) id = 28; else if (bo && id === 28) id = 25;
+          }
           // ensure no stale filters
           ctx.filter = 'none';
           // Invisible action tiles: draw ONLY when player overlaps the tile
@@ -133,7 +157,12 @@
           }
           // Coins: skip drawing into cache (no static coin in cached bitmap)
           const isCoinCheck = (id === 100 || id === 101 || id === 110 || id === 111);
+          const isDoorGate = (id >= 23 && id <= 28);
           if (window.EE_CacheBuild && isCoinCheck) {
+            return;
+          }
+          // Doors/Gates: skip drawing into cache; overlay will render swapped art live
+          if (window.EE_CacheBuild && isDoorGate) {
             return;
           }
           // Animate coins using blocks_special frame ranges in overlay
@@ -235,6 +264,48 @@
               const gx = art % cols;
               const gy = Math.floor(art / cols);
               ctx.drawImage(atlasImg, gx*16, gy*16, 16, 16, tx*16, ty*16, 16, 16);
+            }
+          }
+        }
+        // Doors/Gates: draw swapped art while key is active so visuals match collision
+        {
+          const inRange = (id)=> id>=23 && id<=28;
+          // Stable key states with simple debounce to reduce flicker
+          // Debounced key states
+          let ro = !!(window.isKeyActive && window.isKeyActive('red'));
+          let go = !!(window.isKeyActive && window.isKeyActive('green'));
+          let bo = !!(window.isKeyActive && window.isKeyActive('blue'));
+          const ghost = (tx,ty)=> !!(window.EE_LocalGhosts && window.EE_LocalGhosts.has(`${tx},${ty}`));
+          // Per-color local freeze flags
+          const freezeR = !!(window.EE_LocalFreezeColors && window.EE_LocalFreezeColors.red);
+          const freezeG = !!(window.EE_LocalFreezeColors && window.EE_LocalFreezeColors.green);
+          const freezeB = !!(window.EE_LocalFreezeColors && window.EE_LocalFreezeColors.blue);
+          // Prefer foreground visual if present, otherwise use decoration
+          let visLayer = 0; // 0 none, 1 fg, 2 deco
+          let baseDoor = 0;
+          if (inRange(idFg)) { baseDoor = idFg; visLayer = 1; }
+          else if (inRange(idDeco)) { baseDoor = idDeco; visLayer = 2; }
+          if (baseDoor) {
+            let id = baseDoor;
+            // If locally ghosted, force gate art for that tile. Otherwise apply per-color freeze
+            if (ghost(tx,ty)) {
+              if (id === 23) id = 26; else if (id === 24) id = 27; else if (id === 25) id = 28;
+            } else {
+              // Swap by key state, but freeze per color independently
+              if (id === 23 || id === 26) {
+                if (freezeR) id = 26; else { if (ro && id === 23) id = 26; else if (ro && id === 26) id = 23; }
+              } else if (id === 24 || id === 27) {
+                if (freezeG) id = 27; else { if (go && id === 24) id = 27; else if (go && id === 27) id = 24; }
+              } else if (id === 25 || id === 28) {
+                if (freezeB) id = 28; else { if (bo && id === 25) id = 28; else if (bo && id === 28) id = 25; }
+              }
+            }
+            drawStatic(id);
+            // Hide the other layer's static door/gate so it does not double-draw under/over
+            if (visLayer === 1 && inRange(idDeco)) {
+              // temporarily ignore deco door for this overlay pixel
+            } else if (visLayer === 2 && inRange(idFg)) {
+              // temporarily ignore fg door for this overlay pixel
             }
           }
         }
@@ -395,6 +466,7 @@
       if (editBadge) editBadge.addEventListener('click', () => { window.state.canEdit = !window.state.canEdit; });
     </script>
     <script src="main.js"></script>
+    <script src="net-client.js"></script>
   </body>
   </html>
 
