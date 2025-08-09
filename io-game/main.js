@@ -1187,6 +1187,7 @@ let shift = {
   baseAreaSnapshot: null,
   spectateNextRound: false,
   _pendingFirstRound: false,
+  _alreadyMovedToSpectator: false, // Track if player has been moved to spectator position once
 };
 // Expose for debugging
 try { window.EE_Shift = shift; } catch (e) {}
@@ -1331,15 +1332,12 @@ function initNetworking(){
   Net.on('doors', () => { try { openAllCoinDoors(); } catch(_){ } });
   // Force start now (host pulse) to eliminate drift
   Net.on('shift_go', () => {
-    // If this client joined mid-round or countdown, stay spectating until next round
+    // If this client joined mid-round or countdown, or was eliminated, do not move or change state (unless first round is pending)
     if (shift && shift.spectatorUntilNext && !shift._pendingFirstRound) {
-      shift.roundActive = true;
-      shift.pendingStartAt = 0; shift.statusText = '';
       return;
     }
     // Teleport into play
-    let target = { x: 51, y: 75 };
-    for (const key of (shift.entranceSpawns||new Set())) { const [xs, ys] = key.split(','); target = { x: parseInt(xs,10), y: parseInt(ys,10) }; break; }
+    const target = getEntranceSpawnFallback();
     state.p.x = target.x * TILE; state.p.y = target.y * TILE;
     shift.roundActive = true;
     shift.pendingStartAt = 0; shift.statusText = '';
@@ -1368,25 +1366,25 @@ function initNetworking(){
       const remain = Math.max(0, startAtWall - Date.now());
       shift.pendingStartAt = performance.now() + remain;
     }
-    // Reset round tracking for everyone
+    // Reset round tracking for everyone (per-round flags)
     shift.roundActive = false;
-    // If this is a brand-new game start, include everyone in Round 1
+    // First round includes everyone regardless of spectator flags
     if (firstRound) {
       shift.spectatorUntilNext = false;
       shift.spectateNextRound = false;
       shift.localFinished = false;
       shift._pendingFirstRound = true;
+      shift._alreadyMovedToSpectator = false; // Reset for new game
     } else {
-      // Otherwise non-finishers from last round spectate this round only
+      // Later rounds: spectate/eliminated persist until next Start Game
       shift.spectatorUntilNext = !!shift.spectateNextRound;
+      // Do not clear spectateNextRound here; eliminated remain spectators for the current game
+      shift.localFinished = false;
     }
-    // Clear flags now; finishing in the new round will set localFinished for the following cycle
-    shift.spectateNextRound = false;
-    shift.localFinished = false;
     shift.playersFinished = new Set();
     shift.playersAlive = new Set(['local', ...Array.from(netPlayers.keys())]);
     state.coins = 0; state.blueCoins = 0;
-    // Move to spectator spawn during countdown
+    // During countdown, move everyone visually to spectator spawn
     state.p.x = 52 * TILE; state.p.y = 77 * TILE;
   });
   Net.on('shift_place', ({ level, box }) => {
@@ -1413,7 +1411,7 @@ function initNetworking(){
     // Also schedule a fill at grace end to ensure the outside is blocked on time for all peers
     try {
       const ms = Math.max(0, (typeof graceEndWall === 'number') ? (graceEndWall - Date.now()) : ((shift.graceMs||30000)));
-      setTimeout(() => { try { fillCoinDoorExitsWithBlock16(); if (!shift.localFinished) { state.p.x = 52 * TILE; state.p.y = 77 * TILE; } } catch(_){} }, ms + 5);
+      setTimeout(() => { try { fillCoinDoorExitsWithBlock16(); } catch(_){} }, ms + 5);
     } catch(_){}
     try {
       if (shift.playersFinished) shift.playersFinished.add(from||finisher||'peer');
@@ -1472,23 +1470,75 @@ function fillOldCoinDoorExitsExceptCurrent(prevExits) {
 }
 
 function getEntranceSpawnFallback() {
-  // Choose an entrance tile recorded during box placement, else default (51,75)
-  if (shift && shift.entranceSpawns && shift.entranceSpawns.size) {
-    for (const key of shift.entranceSpawns) {
-      const [xs, ys] = key.split(',');
-      return { x: parseInt(xs, 10), y: parseInt(ys, 10) };
-    }
-  }
-  // If no recorded entrances, fall back to a safe spot inside the current box (top-center)
+  // Deterministic entrance picker shared by host and clients
+  // Preference: top -> left -> bottom -> right; choose entrance closest to that edge's center
+  // Then step 1..4 tiles inward along the edge normal, choosing the first non-solid tile within box.
   try {
-    if (shift && shift.dst) {
-      const x = Math.floor((shift.dst.x0 + shift.dst.x1) / 2);
-      const y = Math.min(shift.dst.y1, shift.dst.y0 + 1);
-      return { x, y };
+    if (!shift || !shift.dst) throw new Error('no box');
+    const x0 = shift.dst.x0, y0 = shift.dst.y0, x1 = shift.dst.x1, y1 = shift.dst.y1;
+    const entrances = [];
+    if (shift.entranceSpawns && shift.entranceSpawns.size) {
+      for (const key of shift.entranceSpawns) {
+        const [xs, ys] = key.split(',');
+        const ex = parseInt(xs, 10), ey = parseInt(ys, 10);
+        if (Number.isFinite(ex) && Number.isFinite(ey)) entrances.push({ x: ex, y: ey });
+      }
     }
-  } catch(_){}
-  // Final fallback
-  return { x: 51, y: 75 };
+    const top = entrances.filter(p => p.y === y0);
+    const left = entrances.filter(p => p.x === x0);
+    const bottom = entrances.filter(p => p.y === y1);
+    const right = entrances.filter(p => p.x === x1);
+    const centerX = Math.floor((x0 + x1) / 2);
+    const centerY = Math.floor((y0 + y1) / 2);
+    function pickClosest(list, axis, center) {
+      if (!list || !list.length) return null;
+      let best = list[0];
+      let bestD = Math.abs((axis === 'x' ? best.x : best.y) - center);
+      for (let i = 1; i < list.length; i++) {
+        const v = list[i];
+        const d = Math.abs((axis === 'x' ? v.x : v.y) - center);
+        if (d < bestD || (d === bestD && (axis === 'x' ? (v.x < best.x) : (v.y < best.y)))) {
+          best = v; bestD = d;
+        }
+      }
+      return best;
+    }
+    let base = null;
+    let normal = { x: 0, y: 1 }; // default inward (top)
+    if (!base && top.length) { base = pickClosest(top, 'x', centerX); normal = { x: 0, y: 1 }; }
+    if (!base && left.length) { base = pickClosest(left, 'y', centerY); normal = { x: 1, y: 0 }; }
+    if (!base && bottom.length) { base = pickClosest(bottom, 'x', centerX); normal = { x: 0, y: -1 }; }
+    if (!base && right.length) { base = pickClosest(right, 'y', centerY); normal = { x: -1, y: 0 }; }
+    // If an entrance exists, step inward 1..4 tiles
+    if (base) {
+      for (let s = 1; s <= 4; s++) {
+        let cx = base.x + normal.x * s;
+        let cy = base.y + normal.y * s;
+        // Clamp within box bounds
+        if (cx < x0) cx = x0; if (cx > x1) cx = x1;
+        if (cy < y0) cy = y0; if (cy > y1) cy = y1;
+        if (!isBlockingAt(cx, cy)) return { x: cx, y: cy };
+      }
+      // If all candidates blocked, fall back to one tile inward from base
+      let fx = base.x + normal.x;
+      let fy = base.y + normal.y;
+      if (fx < x0) fx = x0; if (fx > x1) fx = x1;
+      if (fy < y0) fy = y0; if (fy > y1) fy = y1;
+      return { x: fx, y: fy };
+    }
+    // No entrances: choose top-center nudged one tile inward
+    const defX = centerX;
+    let defY = Math.min(y1, y0 + 1);
+    // Try to avoid solids just below top-center
+    for (let s = 1; s <= 4; s++) {
+      const cy = Math.min(y1, y0 + s);
+      if (!isBlockingAt(defX, cy)) { defY = cy; break; }
+    }
+    return { x: defX, y: defY };
+  } catch (_) {
+    // Final fallback if anything failed
+    return { x: 51, y: 75 };
+  }
 }
 
 // Console test hooks
@@ -2641,17 +2691,17 @@ function loop() {
     if (shift.pendingStartAt) {
       const nowp = now;
       if (nowp >= shift.pendingStartAt && isAuthoritativeHost()) {
-        // Host: start round. Spectators remain at lobby.
-        if (!shift.spectatorUntilNext || shift._pendingFirstRound) {
-          let target = { x: 51, y: 75 };
-          for (const key of (shift.entranceSpawns||new Set())) { const [xs, ys] = key.split(','); target = { x: parseInt(xs,10), y: parseInt(ys,10) }; break; }
+        // Host: start round. Teleport participants only (all on first round; only previous-round finishers otherwise)
+        const allowTeleport = (!shift.spectatorUntilNext) || !!shift._pendingFirstRound;
+        if (allowTeleport) {
+          const target = getEntranceSpawnFallback();
           state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+          shift.roundActive = true;
+          state.coins = 0; state.blueCoins = 0;
         }
-        shift.roundActive = true;
         shift.pendingStartAt = 0; shift.statusText = '';
-        state.coins = 0; state.blueCoins = 0;
         // Broadcast GO to peers
-        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_go' }); } catch(_){}
+        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_go' }); } catch(_){ }
         if (shift) shift._pendingFirstRound = false;
       }
     }
@@ -2676,22 +2726,24 @@ function loop() {
         fillCoinDoorExitsWithBlock16();
         // preserve the snapshot for after placement as well
         shift._prevRoundExits = prevExitsEnd;
-        // Immediately remove non-finishers from play at grace end and mark to spectate next round only
-        try {
-          if (!shift.localFinished) {
-            state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+        // At grace end: mark non-finishers eliminated and move them to spectator position (only once)
+        try { 
+          if (!shift.localFinished) { 
             shift.spectateNextRound = true;
-          }
+            // Only move to spectator position if not already moved there
+            if (!shift._alreadyMovedToSpectator) {
+              state.p.x = 52 * TILE; 
+              state.p.y = 77 * TILE;
+              shift._alreadyMovedToSpectator = true;
+            }
+          } 
         } catch(_) {}
       }
       const remain = Math.max(0, Math.ceil((shift.nextRoundAt - now) / 1000));
       shift.statusText = remain > 0 ? `Next round in ${remain}` : '';
       if (now >= shift.nextRoundAt) {
-        // eliminate non-finishers (local logic): anyone who didn't finish is out until next round
-        if (!shift.localFinished) {
-          state.p.x = 52 * TILE; state.p.y = 77 * TILE; // move to lobby/spectator
-          try { if (shift.playersAlive) shift.playersAlive.delete('local'); } catch(_){}
-        }
+        // At next-round start: do not move non-finishers; they already became spectators at grace end
+        if (!shift.localFinished) { try { if (shift.playersAlive) shift.playersAlive.delete('local'); } catch(_){ } }
         const willPlayNext = !!shift.localFinished;
         // Check if one player remaining
         if (shift.playersAlive.size <= 1) {
@@ -2725,9 +2777,6 @@ function loop() {
             state.p.x = ent.x * TILE; state.p.y = ent.y * TILE;
             state.coins = 0; state.blueCoins = 0;
             shift.playersAlive = new Set(['local']);
-          } else {
-            // stay in spectator lobby for this round
-            state.p.x = 52 * TILE; state.p.y = 77 * TILE;
           }
           shift.playersFinished.clear();
           shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
@@ -2762,9 +2811,6 @@ function loop() {
           if (willPlayNext) {
             state.p.x = ent2.x * TILE; state.p.y = ent2.y * TILE;
             state.coins = 0; state.blueCoins = 0;
-          } else {
-            // stay in spectator lobby for this round
-            state.p.x = 52 * TILE; state.p.y = 77 * TILE;
           }
           // Reset round flags
           shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
@@ -2977,6 +3023,7 @@ if (startBtn) {
       shift.spectateNextRound = false;
       shift.localFinished = false;
       shift._pendingFirstRound = true;
+      shift._alreadyMovedToSpectator = false; // Reset spectator movement flag for new game
       // Move host to spectator spawn immediately for countdown
       state.p.x = 52 * TILE; state.p.y = 77 * TILE;
       // announce placement and countdown start to peers (host-first, wall clock)
