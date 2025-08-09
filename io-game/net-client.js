@@ -18,9 +18,18 @@
     if (statusEl) statusEl.textContent = text;
   }
 
+  function getDefaultIsolatedRoom(){
+    try {
+      const key = 'EEO_TAB_ROOM';
+      let rid = sessionStorage.getItem(key);
+      if (!rid) { rid = `tab-${Math.random().toString(36).slice(2, 10)}`; sessionStorage.setItem(key, rid); }
+      return rid;
+    } catch (_) { return `tab-${Math.random().toString(36).slice(2, 10)}`; }
+  }
+
   function connect(roomId){
-    if (ws && ws.readyState === WebSocket.OPEN) try { ws.close(); } catch(_){}
-    room = roomId || 'lobby';
+    if (ws && ws.readyState === WebSocket.OPEN) try { ws.close(); } catch(_){ }
+    room = roomId || getDefaultIsolatedRoom();
     const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
     const url = `${proto}://${location.host}/ws?room=${encodeURIComponent(room)}`;
     ws = new WebSocket(url);
@@ -54,9 +63,10 @@
   // Hook up UI
   const btn = document.getElementById('connectBtn');
   const input = document.getElementById('roomInput');
-  if (btn && input) {
+  if (btn) {
     btn.addEventListener('click', ()=>{
-      connect(input.value.trim() || 'lobby');
+      const requested = (input && input.value.trim()) || '';
+      connect(requested || undefined);
     });
   }
 })();

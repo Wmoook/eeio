@@ -35,6 +35,17 @@ function broadcast(roomId, data, except) {
   }
 }
 
+function getHostId(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || room.size === 0) return null;
+  let min = null;
+  for (const ws of room) {
+    const v = parseInt(ws.id, 10) || 0;
+    if (min === null || v < min) min = v;
+  }
+  return (min === null) ? null : String(min);
+}
+
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname !== '/ws') {
@@ -60,25 +71,45 @@ server.on('upgrade', (req, socket, head) => {
         return { layer, x, y, id };
       });
       ws.send(JSON.stringify({ t: 'state_full', id: ws.id, shift: state.shift||{}, keys: state.keys||{}, doorsOpen: !!state.doorsOpen, edits: editsArr }));
-    } catch(_){}
+    } catch(_){ }
     ws.on('message', (data) => {
       let msg;
       try { msg = JSON.parse(data.toString()); } catch { return; }
       // Attach sender id
       msg.from = ws.id;
       // Update room state for late-join sync
+      let shouldBroadcast = true;
       try {
         const st = roomStates.get(roomId) || { edits: new Map(), shift: {}, keys: {}, doorsOpen: false };
+        const hostId = getHostId(roomId);
         if (msg.t === 'edit') {
           const key = `${msg.layer}:${msg.x|0},${msg.y|0}`;
           st.edits.set(key, msg.id|0);
         } else if (msg.t === 'shift_place') {
-          st.shift = Object.assign({}, st.shift, { level: msg.level|0, box: msg.box|0, startAtWall: undefined, goAtWall: undefined, graceEndWall: undefined });
-          st.doorsOpen = false;
+          if (ws.id !== hostId) { shouldBroadcast = false; }
+          else {
+            st.shift = Object.assign({}, st.shift, { level: msg.level|0, box: msg.box|0, startAtWall: undefined, goAtWall: undefined, graceEndWall: undefined });
+            st.doorsOpen = false;
+          }
         } else if (msg.t === 'shift_start') {
-          st.shift = Object.assign({}, st.shift, { level: msg.level|0, box: msg.box|0, startAtWall: msg.startAtWall|0, firstRound: !!msg.firstRound });
+          if (ws.id !== hostId) { shouldBroadcast = false; }
+          else {
+            const now = Date.now();
+            const lockUntil = (st.shift && st.shift.lockUntilWall) ? (st.shift.lockUntilWall|0) : 0;
+            if (lockUntil && now < lockUntil) {
+              // Cooldown active: reject this start
+              shouldBroadcast = false;
+            } else {
+              const newLock = now + 60000; // 1 minute cooldown
+              st.shift = Object.assign({}, st.shift, { level: msg.level|0, box: msg.box|0, startAtWall: msg.startAtWall|0, firstRound: !!msg.firstRound, lockUntilWall: newLock });
+              msg.lockUntilWall = newLock;
+            }
+          }
         } else if (msg.t === 'shift_go') {
-          st.shift = Object.assign({}, st.shift, { goAtWall: Date.now() });
+          if (ws.id !== hostId) { shouldBroadcast = false; }
+          else {
+            st.shift = Object.assign({}, st.shift, { goAtWall: Date.now() });
+          }
         } else if (msg.t === 'shift_grace') {
           st.shift = Object.assign({}, st.shift, { graceEndWall: msg.graceEndWall|0 });
         } else if (msg.t === 'key') {
@@ -102,13 +133,13 @@ server.on('upgrade', (req, socket, head) => {
           return; // already broadcast reset event
         }
         roomStates.set(roomId, st);
-      } catch(_){}
-      // Relay to room
-      broadcast(roomId, msg, ws);
+      } catch(_){ }
+      // Relay to room unless suppressed
+      if (shouldBroadcast) broadcast(roomId, msg, ws);
     });
     ws.on('close', () => {
       const r = rooms.get(roomId);
-      if (r) { r.delete(ws); if (r.size === 0) rooms.delete(roomId); }
+      if (r) { r.delete(ws); if (r.size === 0) { rooms.delete(roomId); roomStates.delete(roomId); } }
       broadcast(roomId, { t: 'leave', id: ws.id });
     });
     // Welcome with your id

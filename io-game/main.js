@@ -1188,6 +1188,9 @@ let shift = {
   spectateNextRound: false,
   _pendingFirstRound: false,
   _alreadyMovedToSpectator: false, // Track if player has been moved to spectator position once
+  _serverIdle: true, // When true, server is in default reset state waiting for players
+    _goTimeoutId: 0,
+    _startingClickLock: false,
 };
 // Expose for debugging
 try { window.EE_Shift = shift; } catch (e) {}
@@ -1243,19 +1246,72 @@ function isAuthoritativeHost(){
 function initNetworking(){
   if (typeof Net === 'undefined' || initNetworking._wired) return;
   initNetworking._wired = true;
+  function resetToDefaultState(){
+    try {
+      // Restore base area snapshot if present
+      if (shift && shift.baseAreaSnapshot) {
+        const { x0, y0, w, h } = shift.baseAreaSnapshot.meta.area;
+        for (let dy = 0; dy < h; dy++) {
+          const y = y0 + dy;
+          for (let dx = 0; dx < w; dx++) {
+            const x = x0 + dx;
+            const bid = (shift.baseAreaSnapshot.bg[dy] && shift.baseAreaSnapshot.bg[dy][dx]) || 0;
+            const did = (shift.baseAreaSnapshot.deco[dy] && shift.baseAreaSnapshot.deco[dy][dx]) || 0;
+            const fid = (shift.baseAreaSnapshot.fg[dy] && shift.baseAreaSnapshot.fg[dy][dx]) || 0;
+            setTileBg(x, y, 0); setTileDeco(x, y, 0); setTileFg(x, y, 0);
+            if (bid) setTileBg(x, y, bid);
+            if (did) setTileDeco(x, y, did);
+            if (fid) setTileFg(x, y, fid);
+          }
+        }
+        tileCache.dirtyAll = true; rebuildDynamicIndex();
+      }
+    } catch(_) {}
+    try {
+      // Clear all transient round state
+      shift.roundActive = false;
+      shift.firstFinishTime = 0;
+      shift.graceEnd = 0;
+      shift.finished = false;
+      shift.finishedName = '';
+      shift.pendingStartAt = 0;
+      shift.nextRoundAt = 0;
+      shift.playersAlive = new Set();
+      shift.playersFinished = new Set();
+      shift.spectatorUntilNext = false;
+      shift.spectateNextRound = false;
+      shift.localFinished = false;
+      shift._pendingFirstRound = false;
+      shift._alreadyMovedToSpectator = false;
+      shift.lastSwap = 0;
+      shift.statusText = '';
+      // Return player to spectator spawn
+      state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+      state.coins = 0; state.blueCoins = 0;
+      // Mark idle
+      shift._serverIdle = true;
+    } catch(_) {}
+  }
   // Late-join full state hydration
-  Net.on('state_full', ({ shift: s, keys, doorsOpen, edits }) => {
+  Net.on('state_full', (msg) => {
+    const { id: targetId, shift: s, keys, doorsOpen, edits } = msg || {};
+    // Only process full-state snapshots intended for this client, or server-wide resets
+    try { if (targetId && typeof Net !== 'undefined' && Net.id && targetId !== Net.id && targetId !== 'server') return; } catch(_){ }
     shift._hydratingFromFull = true;
     shift._pendingEdits = [];
     (async () => {
       try {
         // 1) Load DB
-        if (s && typeof s.level === 'number') shift.curLevel = s.level;
-        if (s && typeof s.box === 'number') shift.curBox = s.box;
+        // Only adopt level/box if there is an active game (countdown or running)
+        const hasServerBox = !!(s && typeof s.level === 'number' && typeof s.box === 'number');
+        const hasActiveGame = !!(s && (typeof s.startAtWall === 'number' || s.goAtWall));
         try { await ensureDBReady(); } catch (_) {}
         // 2) Place box
-        if (typeof shift.curLevel === 'number' && typeof shift.curBox === 'number' && shift.dbMaps) {
-          try { placeShiftBox(shift.curLevel, shift.curBox); } catch (_) {}
+        if (hasServerBox && hasActiveGame && shift.dbMaps) {
+          try {
+            shift.curLevel = s.level; shift.curBox = s.box;
+            placeShiftBox(shift.curLevel, shift.curBox);
+          } catch (_) {}
         }
         // 3) Apply edits (snapshot and any queued during hydration)
         const applyEdit = (e) => {
@@ -1282,18 +1338,29 @@ function initNetworking(){
         }
         // Coin doors are local per player; ignore server doorsOpen flag
         if (s && typeof s.startAtWall === 'number' && !s.goAtWall) {
-          const remain = Math.max(0, s.startAtWall - Date.now());
-          shift.pendingStartAt = performance.now() + remain;
+          const remainMs = Math.max(0, s.startAtWall - Date.now());
+          // Do NOT arm local auto-start. Only display countdown, wait for host 'shift_go'.
           shift.roundActive = false;
           // Late join during countdown: spectate until next round
-    state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+          state.p.x = 52 * TILE; state.p.y = 77 * TILE;
           shift.spectatorUntilNext = true;
+          // Show countdown text locally (non-authoritative)
+          const remain = Math.ceil(remainMs / 1000);
+          shift.statusText = remain > 0 ? `Starting in ${remain}` : '';
+          // Server clearly not idle if a countdown is active
+          shift._serverIdle = false;
         }
         if (s && s.goAtWall) {
           // Round already in progress: spectate until next round
           state.p.x = 52 * TILE; state.p.y = 77 * TILE;
           shift.roundActive = true; shift.pendingStartAt = 0; shift.statusText = '';
           shift.spectatorUntilNext = true; shift.localFinished = true;
+          // Server not idle if a round is running
+          shift._serverIdle = false;
+        }
+        // If we have any shift metadata at all (level/box), the server isn't idle
+        if (hasActiveGame) {
+          shift._serverIdle = false;
         }
         if (s && typeof s.graceEndWall === 'number') {
           const remainG = Math.max(0, s.graceEndWall - Date.now());
@@ -1308,13 +1375,20 @@ function initNetworking(){
     })();
   });
   Net.on('join', ({ id }) => {
-    if (!netPlayers.has(id)) netPlayers.set(id, { x: 52*TILE, y: 77*TILE, faceIndex: 0, name: `P${id}` });
-    try { if (shift && shift.playersAlive) shift.playersAlive.add(id); } catch(_){ }
+    if (!netPlayers.has(id)) netPlayers.set(id, { faceIndex: 0, name: `P${id}` });
+    try {
+      if (shift && shift.playersAlive) shift.playersAlive.add(id);
+    } catch(_){ }
   });
-  Net.on('leave', ({ id }) => { netPlayers.delete(id); try { if (shift && shift.playersAlive) shift.playersAlive.delete(id); } catch(_){ } });
+  Net.on('leave', ({ id }) => { 
+    netPlayers.delete(id); 
+    try { if (shift && shift.playersAlive) shift.playersAlive.delete(id); } catch(_){ }
+    // Do not auto-reset on leave; server will decide when to reset, or host will start explicitly
+  });
   Net.on('state', ({ from, x, y, faceIndex, name }) => {
     if (!from) return;
     const pl = netPlayers.get(from) || {};
+    // Initialize only when we receive a movement update, avoid initial spawn flash
     pl.x = x|0; pl.y = y|0; pl.faceIndex = faceIndex|0; if (name) pl.name = name;
     // Initialize smoothing targets if needed
     if (typeof pl.sx !== 'number' || typeof pl.sy !== 'number') { pl.sx = pl.x; pl.sy = pl.y; }
@@ -1330,15 +1404,33 @@ function initNetworking(){
     if (state && state.keys) state.keys[color] = true;
   });
   Net.on('doors', () => { try { openAllCoinDoors(); } catch(_){ } });
+  // Server instructed a room reset: restore base map and idle state
+  Net.on('reset_room', () => {
+    try { resetToDefaultState(); } catch(_){}
+  });
+  // Additional finisher arrivals during grace window
+  Net.on('shift_done', ({ from }) => {
+    try {
+      if (shift && !shift.localFinished && from === Net.id) {
+        // ignore echo for local client. handled on local path
+      }
+      if (shift && shift.playersFinished) shift.playersFinished.add(from||'peer');
+      if (shift && shift.playersAlive && from) shift.playersAlive.delete(from);
+    } catch(_) {}
+  });
   // Force start now (host pulse) to eliminate drift
-  Net.on('shift_go', () => {
+  Net.on('shift_go', ({ spawnX, spawnY } = {}) => {
     // If this client joined mid-round or countdown, or was eliminated, do not move or change state (unless first round is pending)
     if (shift && shift.spectatorUntilNext && !shift._pendingFirstRound) {
       return;
     }
     // Teleport into play
-    const target = getEntranceSpawnFallback();
-    state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+    if (Number.isFinite(spawnX) && Number.isFinite(spawnY)) {
+      state.p.x = (spawnX|0) * TILE; state.p.y = (spawnY|0) * TILE;
+    } else {
+      const target = getEntranceSpawnFallback();
+      state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+    }
     shift.roundActive = true;
     shift.pendingStartAt = 0; shift.statusText = '';
     state.coins = 0; state.blueCoins = 0;
@@ -1366,6 +1458,8 @@ function initNetworking(){
       const remain = Math.max(0, startAtWall - Date.now());
       shift.pendingStartAt = performance.now() + remain;
     }
+    // A start signal means the server is not idle
+    shift._serverIdle = false;
     // Reset round tracking for everyone (per-round flags)
     shift.roundActive = false;
     // First round includes everyone regardless of spectator flags
@@ -1384,16 +1478,31 @@ function initNetworking(){
     shift.playersFinished = new Set();
     shift.playersAlive = new Set(['local', ...Array.from(netPlayers.keys())]);
     state.coins = 0; state.blueCoins = 0;
-    // During countdown, move everyone visually to spectator spawn
-    state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+    // During countdown, move only participants (first round includes all, later rounds only winners)
+    const isParticipant = !!firstRound || !!shift.localFinished;
+    if (isParticipant) {
+      state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+    }
   });
-  Net.on('shift_place', ({ level, box }) => {
+  Net.on('shift_place', ({ level, box, spawnX, spawnY }) => {
     if (typeof level === 'number') shift.curLevel = level;
     if (typeof box === 'number') shift.curBox = box;
     (async () => {
       try { await ensureDBReady(); } catch (_) {}
       try { placeShiftBox(shift.curLevel, shift.curBox); } catch (_) {}
       try { tileCache.dirtyAll = true; rebuildDynamicIndex(); } catch (_) {}
+      // If this is a between-round placement (no countdown pending), teleport winners immediately
+      try {
+        if (!shift.pendingStartAt) {
+          let ent = null;
+          if (Number.isFinite(spawnX) && Number.isFinite(spawnY)) ent = { x: (spawnX|0), y: (spawnY|0) };
+          else ent = getEntranceSpawnFallback();
+          if (shift.localFinished && !shift.spectatorUntilNext) {
+            state.p.x = ent.x * TILE; state.p.y = ent.y * TILE;
+            state.coins = 0; state.blueCoins = 0;
+          }
+        }
+      } catch(_) {}
     })();
   });
   Net.on('shift_grace', ({ from, finisher, graceEndWall }) => {
@@ -1474,6 +1583,22 @@ function getEntranceSpawnFallback() {
   // Preference: top -> left -> bottom -> right; choose entrance closest to that edge's center
   // Then step 1..4 tiles inward along the edge normal, choosing the first non-solid tile within box.
   try {
+    // Special rule: Level 3, Box 2 always uses fixed entrance (67, 61)
+    if (shift && shift.curLevel === 3 && shift.curBox === 2) {
+      return { x: 67, y: 61 };
+    }
+    // Special rule: Level 1, Box 12 always uses fixed entrance (51, 48)
+    if (shift && shift.curLevel === 1 && shift.curBox === 12) {
+      return { x: 51, y: 48 };
+    }
+    // Special rule: Level 2, Box 1 always uses fixed entrance (51, 48)
+    if (shift && shift.curLevel === 2 && shift.curBox === 1) {
+      return { x: 51, y: 48 };
+    }
+    // Special rule: Level 5, Box 3 always uses fixed entrance (67, 61)
+    if (shift && shift.curLevel === 5 && shift.curBox === 3) {
+      return { x: 67, y: 61 };
+    }
     if (!shift || !shift.dst) throw new Error('no box');
     const x0 = shift.dst.x0, y0 = shift.dst.y0, x1 = shift.dst.x1, y1 = shift.dst.y1;
     const entrances = [];
@@ -2481,6 +2606,7 @@ function tick() {
             // Open coin doors: convert FG id 43 at all border positions to id 136 (open coin door sprite, non-blocking)
             openAllCoinDoors();
             if (!shift.firstFinishTime) {
+              // First finisher of the round: start grace for everyone
               shift.firstFinishTime = performance.now();
               shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
               shift.finished = true;
@@ -2489,6 +2615,12 @@ function tick() {
               // broadcast grace start to peers (use wall clock for sync)
               try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){ }
               // Teleport finisher immediately to winner staging area
+              state.p.x = 51 * TILE; state.p.y = 75 * TILE;
+            } else if (!shift.localFinished) {
+              // Grace already running; this player also finished within grace window
+              shift.localFinished = true;
+              try { if (shift.playersFinished) shift.playersFinished.add('local'); } catch(_) {}
+              try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_done' }); } catch(_){ }
               state.p.x = 51 * TILE; state.p.y = 75 * TILE;
             }
           }
@@ -2507,17 +2639,26 @@ function tick() {
   }
   state.onLadder = !!touchingLadder;
   // If coins requirement met and player exits the box (avoid false start when CoinReq==0)
-  if (shift && shift.roundActive && (shift.curCoinReq||0) > 0 && (state.coins|0) >= (shift.curCoinReq||0) && !shift.firstFinishTime) {
+  if (shift && shift.roundActive && (shift.curCoinReq||0) > 0 && (state.coins|0) >= (shift.curCoinReq||0)) {
     const inside = (cx >= shift.dst.x0 && cx <= shift.dst.x1 && cy >= shift.dst.y0 && cy <= shift.dst.y1);
     if (!inside) {
       openAllCoinDoors();
-      shift.firstFinishTime = performance.now();
-      shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
-      shift.finished = true;
-      shift.localFinished = true;
-      shift.finishedName = (window.state && window.state.playerName) || 'Player';
-      try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){}
-      state.p.x = 51 * TILE; state.p.y = 75 * TILE;
+      if (!shift.firstFinishTime) {
+        // First finisher by exiting the box: start grace
+        shift.firstFinishTime = performance.now();
+        shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
+        shift.finished = true;
+        shift.localFinished = true;
+        shift.finishedName = (window.state && window.state.playerName) || 'Player';
+        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){ }
+        state.p.x = 51 * TILE; state.p.y = 75 * TILE;
+      } else if (!shift.localFinished) {
+        // Grace already running; this player also finished within grace window
+        shift.localFinished = true;
+        try { if (shift.playersFinished) shift.playersFinished.add('local'); } catch(_) {}
+        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_done' }); } catch(_){ }
+        state.p.x = 51 * TILE; state.p.y = 75 * TILE;
+      }
     }
   }
   const isArrow = (id)=>id===1||id===2||id===3||id===1518||id===411||id===412||id===413||id===1519;
@@ -2700,8 +2841,20 @@ function loop() {
           state.coins = 0; state.blueCoins = 0;
         }
         shift.pendingStartAt = 0; shift.statusText = '';
-        // Broadcast GO to peers
-        try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_go' }); } catch(_){ }
+        // Broadcast GO with authoritative entrance from host
+        try {
+          if (typeof Net !== 'undefined' && Net.id) {
+            const tpos = getEntranceSpawnFallback();
+            Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox, spawnX: tpos.x|0, spawnY: tpos.y|0 });
+            Net.send({ t: 'shift_go', spawnX: tpos.x|0, spawnY: tpos.y|0 });
+          }
+        } catch(_){ }
+        try {
+          if (allowTeleport && !shift.spectatorUntilNext) {
+            const target = getEntranceSpawnFallback();
+            state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+          }
+        } catch(_) {}
         if (shift) shift._pendingFirstRound = false;
       }
     }
@@ -2712,7 +2865,7 @@ function loop() {
       shift.roundActive = false; shift.firstFinishTime = 0; shift.finishedName = '';
       shift.playersAlive = new Set();
       shift.playersFinished.clear();
-      state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+      // Do not forcibly move player here; lobby position is managed elsewhere
     }
     // disable the old 10s rotation demo
     // If grace running and timer expired, advance difficulty (placeholder) and respawn player
@@ -2743,7 +2896,10 @@ function loop() {
       shift.statusText = remain > 0 ? `Next round in ${remain}` : '';
       if (now >= shift.nextRoundAt) {
         // At next-round start: do not move non-finishers; they already became spectators at grace end
-        if (!shift.localFinished) { try { if (shift.playersAlive) shift.playersAlive.delete('local'); } catch(_){ } }
+          if (!shift.localFinished) { 
+            try { if (shift.playersAlive) shift.playersAlive.delete('local'); } catch(_){ } 
+            shift.spectatorUntilNext = true; // ensure eliminated stay spectators
+          }
         const willPlayNext = !!shift.localFinished;
         // Check if one player remaining
         if (shift.playersAlive.size <= 1) {
@@ -2777,6 +2933,9 @@ function loop() {
             state.p.x = ent.x * TILE; state.p.y = ent.y * TILE;
             state.coins = 0; state.blueCoins = 0;
             shift.playersAlive = new Set(['local']);
+          } else {
+            // Ensure non-finishers remain spectators
+            shift.spectatorUntilNext = true;
           }
           shift.playersFinished.clear();
           shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
@@ -2811,16 +2970,16 @@ function loop() {
           if (willPlayNext) {
             state.p.x = ent2.x * TILE; state.p.y = ent2.y * TILE;
             state.coins = 0; state.blueCoins = 0;
+          } else {
+            shift.spectatorUntilNext = true;
           }
           // Reset round flags
           shift.firstFinishTime = 0; shift.finished = false; shift.finishedName = '';
           shift.graceEnd = 0; shift.nextRoundAt = 0; shift.statusText = '';
           shift.lastSwap = now;
         }
-        // New round: clear per-round flags; losers spectated this round only
-        shift.spectatorUntilNext = false;
-        shift.spectateNextRound = false;
-        shift.localFinished = false;
+        // New round: keep eliminated players spectating until a new Start Game is pressed
+        // Winners will have localFinished cleared on shift_start for the next game
       }
     }
   }
@@ -3003,6 +3162,11 @@ const startBtn = document.getElementById('startGame');
 if (startBtn) {
   startBtn.addEventListener('click', async () => {
     try {
+        // Only the authoritative host can start the game; ignore clicks from others to avoid local desync
+        if (!isAuthoritativeHost()) { shift.statusText = 'Only the host can start the game'; return; }
+      if (shift._startingClickLock) return;
+      shift._startingClickLock = true;
+      setTimeout(() => { try { shift._startingClickLock = false; } catch(_){} }, 500);
       // Ensure DBs are loaded
       await loadShiftDBOnce();
       // Refill any coin-door exit spaces with solid block 16
@@ -3018,6 +3182,8 @@ if (startBtn) {
       // Countdown start (5s). Broadcast using wall-clock to avoid drift.
       const startAtWall = Date.now() + (shift.startCountdownMs||5000);
       shift.pendingStartAt = performance.now() + (shift.startCountdownMs||5000);
+        // Starting a game means server is not idle
+        shift._serverIdle = false;
       // Round 1: ensure local flags are cleared immediately (server won't echo our own start)
       shift.spectatorUntilNext = false;
       shift.spectateNextRound = false;
@@ -3031,9 +3197,10 @@ if (startBtn) {
         if (typeof Net !== 'undefined' && Net.id) {
           Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox });
           Net.send({ t: 'shift_start', level: shift.curLevel, box: shift.curBox, startAtWall, firstRound: true });
-          setTimeout(() => { try { Net.send({ t: 'shift_go' }); } catch(_){} }, (shift.startCountdownMs||5000));
+          if (shift._goTimeoutId) { try { clearTimeout(shift._goTimeoutId); } catch(_){} }
+          shift._goTimeoutId = setTimeout(() => { try { Net.send({ t: 'shift_go' }); } catch(_){} }, (shift.startCountdownMs||5000));
         }
-      } catch(_){}
+      } catch(_){ }
       shift.statusText = 'Starting in 5';
       shift.roundActive = false; shift.firstFinishTime = 0; shift.finishedName = '';
       shift.playersAlive = new Set(['local']);
