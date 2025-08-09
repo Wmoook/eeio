@@ -1040,6 +1040,66 @@ setTimeout(()=>{
   document.body.appendChild(div);
 })();
 
+// Elimination message
+function showEliminationMessage() {
+  const div = document.createElement('div');
+  div.style.cssText = 'position:fixed; top:40%; left:50%; transform:translate(-50%,-50%); font-size:64px; font-weight:bold; color:#ff0000; text-shadow:3px 3px 6px rgba(0,0,0,0.9); z-index:10000; pointer-events:none; animation: eliminationPulse 2s ease-out;';
+  div.textContent = 'ELIMINATED';
+  
+  // Add CSS animation if not already present
+  if (!document.getElementById('eliminationStyle')) {
+    const style = document.createElement('style');
+    style.id = 'eliminationStyle';
+    style.textContent = `
+      @keyframes eliminationPulse {
+        0% { transform: translate(-50%,-50%) scale(0.5); opacity: 0; }
+        20% { transform: translate(-50%,-50%) scale(1.2); opacity: 1; }
+        40% { transform: translate(-50%,-50%) scale(1); }
+        100% { transform: translate(-50%,-50%) scale(1); opacity: 1; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  document.body.appendChild(div);
+  setTimeout(() => {
+    div.style.transition = 'opacity 1s';
+    div.style.opacity = '0';
+    setTimeout(() => div.remove(), 1000);
+  }, 3000);
+}
+
+// Victory message
+function showVictoryMessage(winnerName) {
+  const div = document.createElement('div');
+  div.style.cssText = 'position:fixed; top:40%; left:50%; transform:translate(-50%,-50%); font-size:48px; font-weight:bold; color:#00ff00; text-shadow:3px 3px 6px rgba(0,0,0,0.9); z-index:10000; pointer-events:none; text-align:center; animation: victoryPulse 3s ease-out;';
+  div.innerHTML = `${winnerName || 'Player'}<br>WINS!`;
+  
+  // Add CSS animation if not already present
+  if (!document.getElementById('victoryStyle')) {
+    const style = document.createElement('style');
+    style.id = 'victoryStyle';
+    style.textContent = `
+      @keyframes victoryPulse {
+        0% { transform: translate(-50%,-50%) scale(0.5) rotate(0deg); opacity: 0; }
+        20% { transform: translate(-50%,-50%) scale(1.3) rotate(5deg); opacity: 1; }
+        40% { transform: translate(-50%,-50%) scale(1.1) rotate(-5deg); }
+        60% { transform: translate(-50%,-50%) scale(1.2) rotate(3deg); }
+        80% { transform: translate(-50%,-50%) scale(1) rotate(-2deg); }
+        100% { transform: translate(-50%,-50%) scale(1) rotate(0deg); opacity: 1; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  document.body.appendChild(div);
+  setTimeout(() => {
+    div.style.transition = 'opacity 2s';
+    div.style.opacity = '0';
+    setTimeout(() => div.remove(), 2000);
+  }, 5000);
+}
+
 // Rendering: use original smileys.png spritesheet
 const canvas = document.getElementById('canvas');
 canvas.setAttribute('tabindex', '0');
@@ -1191,6 +1251,11 @@ let shift = {
   _serverIdle: true, // When true, server is in default reset state waiting for players
     _goTimeoutId: 0,
     _startingClickLock: false,
+  // Competitive game mode
+  competitiveMode: false,
+  gameWinner: null,
+  gameOver: false,
+  playersAtRoundStart: 0, // Track how many players started each round
 };
 // Expose for debugging
 try { window.EE_Shift = shift; } catch (e) {}
@@ -1288,6 +1353,11 @@ function initNetworking(){
       // Return player to spectator spawn
       state.p.x = 52 * TILE; state.p.y = 77 * TILE;
       state.coins = 0; state.blueCoins = 0;
+      // Reset competitive mode
+      shift.competitiveMode = false;
+      shift.gameOver = false;
+      shift.gameWinner = null;
+      shift.playersAtRoundStart = 0;
       // Mark idle
       shift._serverIdle = true;
     } catch(_) {}
@@ -1417,10 +1487,33 @@ function initNetworking(){
       }
       if (shift && shift.playersFinished) shift.playersFinished.add(from||'peer');
       if (shift && shift.playersAlive && from) shift.playersAlive.delete(from);
+      // In competitive mode, ensure we have a finish time for this peer
+      if (shift && shift.competitiveMode) {
+        const pid = from||'peer';
+        if (!shift.finishTimes) shift.finishTimes = new Map();
+        if (!shift.finishTimes.has(pid)) {
+          const t = Math.max(0, Date.now() - (shift.roundStartWall||Date.now()));
+          shift.finishTimes.set(pid, t);
+        }
+      }
+    } catch(_) {}
+  });
+  // Peer reported their finish time (ms since round start)
+  Net.on('comp_finish_time', ({ from, ms }) => {
+    try {
+      if (!shift || !shift.competitiveMode) return;
+      const t = Math.max(0, ms|0);
+      if (!shift.finishTimes) shift.finishTimes = new Map();
+      shift.finishTimes.set(from||'peer', t);
     } catch(_) {}
   });
   // Force start now (host pulse) to eliminate drift
   Net.on('shift_go', ({ spawnX, spawnY } = {}) => {
+    // Track how many players are starting this round (for competitive mode)
+    if (shift.competitiveMode) {
+      shift.playersAtRoundStart = shift.playersAlive.size;
+    }
+    
     // If this client joined mid-round or countdown, or was eliminated, do not move or change state (unless first round is pending)
     if (shift && shift.spectatorUntilNext && !shift._pendingFirstRound) {
       return;
@@ -1432,9 +1525,13 @@ function initNetworking(){
       const target = getEntranceSpawnFallback();
       state.p.x = target.x * TILE; state.p.y = target.y * TILE;
     }
+    // Record round start wall clock for timing computations
+    shift.roundStartWall = Date.now();
     shift.roundActive = true;
     shift.pendingStartAt = 0; shift.statusText = '';
     state.coins = 0; state.blueCoins = 0;
+    // Reset per-round timing map
+    shift.finishTimes = new Map();
     // Clear first-round pending marker after GO processes once
     if (shift) shift._pendingFirstRound = false;
   });
@@ -1524,6 +1621,26 @@ function initNetworking(){
       if (shift.playersFinished) shift.playersFinished.add(from||finisher||'peer');
       if (shift.playersAlive && from) shift.playersAlive.delete(from);
     } catch(_){ }
+  });
+  
+  // Competitive game victory announcement
+  Net.on('comp_victory', ({ winner }) => {
+    if (shift.competitiveMode && !shift.gameOver) {
+      shift.gameOver = true;
+      shift.gameWinner = winner;
+      showVictoryMessage(winner);
+      shift.statusText = `${winner} wins!`;
+      // Move all players to spectator area
+      state.p.x = 52 * TILE;
+      state.p.y = 77 * TILE;
+    }
+  });
+  
+  // Competitive game start announcement
+  Net.on('comp_start', () => {
+    shift.competitiveMode = true;
+    shift.gameOver = false;
+    shift.gameWinner = null;
   });
 }
 
@@ -2275,6 +2392,66 @@ function drawWorld() {
     rhEl.textContent = parts.join(' • ');
     rhEl.style.display = parts.length ? 'block' : '';
   }
+  // Competitive HUD overlays
+  if (shift && shift.competitiveMode) {
+    // Bottom center: players finished X/X
+    try {
+      const total = Math.max(shift.playersAtRoundStart||0, shift.playersAlive ? shift.playersAlive.size : 0);
+      const finished = shift.playersFinished ? shift.playersFinished.size : 0;
+      // create/update footer element
+      let footer = document.getElementById('compFooter');
+      if (!footer) {
+        footer = document.createElement('div');
+        footer.id = 'compFooter';
+        footer.style.position = 'fixed'; footer.style.bottom = '8px'; footer.style.left = '50%'; footer.style.transform = 'translateX(-50%)';
+        footer.style.zIndex = '9999'; footer.style.background = 'rgba(0,0,0,0.6)'; footer.style.border = '1px solid #555'; footer.style.borderRadius = '8px';
+        footer.style.padding = '6px 10px'; footer.style.fontSize = '13px'; footer.style.color = '#fff'; footer.style.pointerEvents = 'none';
+        document.body.appendChild(footer);
+      }
+      footer.textContent = `Players finished: ${finished}/${total}`;
+    } catch(_) {}
+    // Right side: per-player finish times
+    try {
+      let panel = document.getElementById('compTimes');
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.id = 'compTimes';
+        panel.style.position = 'fixed'; panel.style.top = '80px'; panel.style.right = '8px';
+        panel.style.zIndex = '9999'; panel.style.background = 'rgba(0,0,0,0.5)'; panel.style.border = '1px solid #555'; panel.style.borderRadius = '8px';
+        panel.style.padding = '8px 10px'; panel.style.fontSize = '12px'; panel.style.color = '#fff'; panel.style.pointerEvents = 'none';
+        document.body.appendChild(panel);
+      }
+      // Build unique name mapping (handle duplicate names -> suffix 1..N)
+      const idToName = new Map();
+      const nameCounts = new Map();
+      const addName = (id, raw) => {
+        const base = (raw||'Player').trim() || 'Player';
+        const count = (nameCounts.get(base)||0) + 1; nameCounts.set(base, count);
+        const final = count > 1 ? `${base}${count}` : base;
+        idToName.set(id, final);
+      };
+      // Local
+      addName('local', (window.state && window.state.playerName) || 'Player');
+      // Peers
+      for (const [pid, p] of netPlayers.entries()) addName(pid, p?.name || `P${pid}`);
+      // Collect and sort finish times
+      const rows = [];
+      if (shift.finishTimes && shift.finishTimes.size) {
+        for (const [id, ms] of shift.finishTimes.entries()) {
+          const nm = idToName.get(id) || `P${id}`;
+          rows.push({ name: nm, ms: ms|0 });
+        }
+        rows.sort((a,b)=>a.ms-b.ms);
+      }
+      // Render
+      panel.innerHTML = '<div style="font-weight:600;margin-bottom:4px;">Finish times</div>' +
+        (rows.length ? rows.map(r=>`<div>${r.name}: ${(r.ms/1000).toFixed(2)}s</div>`).join('') : '<div>—</div>');
+    } catch(_) {}
+  } else {
+    // Hide comp HUD when not in competitive mode
+    const footer = document.getElementById('compFooter'); if (footer) footer.remove();
+    const panel = document.getElementById('compTimes'); if (panel) panel.remove();
+  }
   // Optionally overlay action-only deco (e.g., arrows) debugging layer
   // for (let y = 0; y < WORLD_H; y++) { for (let x = 0; x < WORLD_W; x++) { window.EE_DrawTileFrom(ctx, x, y, decoMap); } }
   // when editing, draw a faint crosshair at mouse tile
@@ -2621,6 +2798,17 @@ function tick() {
               shift.finishedName = (window.state && window.state.playerName) || 'Player';
               // broadcast grace start to peers (use wall clock for sync)
               try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){ }
+              // Competitive: record local finish time and mark finished set
+              try {
+                if (shift.competitiveMode) {
+                  const base = (typeof shift.roundStartWall === 'number' && shift.roundStartWall > 0) ? shift.roundStartWall : (Date.now() - 1);
+                  const t = Math.max(1, Date.now() - base);
+                  if (!shift.finishTimes) shift.finishTimes = new Map();
+                  shift.finishTimes.set('local', t);
+                  if (shift.playersFinished) shift.playersFinished.add('local');
+                  if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'comp_finish_time', ms: t });
+                }
+              } catch(_) {}
               // Teleport finisher immediately to winner staging area
               state.p.x = 51 * TILE; state.p.y = 75 * TILE;
             } else if (!shift.localFinished) {
@@ -2628,6 +2816,16 @@ function tick() {
               shift.localFinished = true;
               try { if (shift.playersFinished) shift.playersFinished.add('local'); } catch(_) {}
               try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_done' }); } catch(_){ }
+              // Record finish time relative to round start in competitive mode
+              try {
+                if (shift.competitiveMode) {
+                  const base = (typeof shift.roundStartWall === 'number' && shift.roundStartWall > 0) ? shift.roundStartWall : (Date.now() - 1);
+                  const t = Math.max(1, Date.now() - base);
+                  if (!shift.finishTimes) shift.finishTimes = new Map();
+                  shift.finishTimes.set('local', t);
+                  if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'comp_finish_time', ms: t });
+                }
+              } catch(_) {}
               state.p.x = 51 * TILE; state.p.y = 75 * TILE;
             } else if (shift.localFinished && shift.firstFinishTime) {
               // Already marked as finished but ensure we're at winner staging during grace
@@ -2666,12 +2864,33 @@ function tick() {
         shift.localFinished = true;
         shift.finishedName = (window.state && window.state.playerName) || 'Player';
         try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_grace', finisher: shift.finishedName, graceEndWall: Date.now() + (shift.graceMs||30000) }); } catch(_){ }
+        // Competitive: record local finish time and mark finished set
+        try {
+          if (shift.competitiveMode) {
+            const base = (typeof shift.roundStartWall === 'number' && shift.roundStartWall > 0) ? shift.roundStartWall : (Date.now() - 1);
+            const t = Math.max(1, Date.now() - base);
+            if (!shift.finishTimes) shift.finishTimes = new Map();
+            shift.finishTimes.set('local', t);
+            if (shift.playersFinished) shift.playersFinished.add('local');
+            if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'comp_finish_time', ms: t });
+          }
+        } catch(_) {}
         state.p.x = 51 * TILE; state.p.y = 75 * TILE;
       } else if (!shift.localFinished) {
         // Grace already running; this player also finished within grace window
         shift.localFinished = true;
         try { if (shift.playersFinished) shift.playersFinished.add('local'); } catch(_) {}
         try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'shift_done' }); } catch(_){ }
+        // Record finish time relative to round start in competitive mode
+        try {
+          if (shift.competitiveMode) {
+            const base = (typeof shift.roundStartWall === 'number' && shift.roundStartWall > 0) ? shift.roundStartWall : (Date.now() - 1);
+            const t = Math.max(1, Date.now() - base);
+            if (!shift.finishTimes) shift.finishTimes = new Map();
+            shift.finishTimes.set('local', t);
+            if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'comp_finish_time', ms: t });
+          }
+        } catch(_) {}
         state.p.x = 51 * TILE; state.p.y = 75 * TILE;
       } else if (shift.localFinished && shift.firstFinishTime) {
         // Already marked as finished but ensure we're at winner staging during grace
@@ -2855,7 +3074,15 @@ function loop() {
       if (nowp >= shift.pendingStartAt && isAuthoritativeHost()) {
         // Host: start round. Teleport participants only (all on first round; only previous-round finishers otherwise)
         const allowTeleport = !shift.spectatorUntilNext || !!shift._pendingFirstRound;
+        
+        // Track how many players are starting this round (for competitive mode)
+        if (shift.competitiveMode) {
+          shift.playersAtRoundStart = shift.playersAlive.size;
+        }
+        
         if (allowTeleport) {
+          // Set round start wall-clock immediately for host so local timing isn't 0
+          shift.roundStartWall = Date.now();
           const target = getEntranceSpawnFallback();
           state.p.x = target.x * TILE; state.p.y = target.y * TILE;
           shift.roundActive = true;
@@ -2897,6 +3124,10 @@ function loop() {
           state.p.y = 77 * TILE;
           shift._alreadyMovedToSpectator = true;
         }
+        // Show elimination message in competitive mode
+        if (shift.competitiveMode && !shift.gameOver) {
+          showEliminationMessage();
+        }
       }
       
       // Host-only logic for round transition
@@ -2926,6 +3157,66 @@ function loop() {
           shift.spectatorUntilNext = true; // ensure eliminated stay spectators
         }
         const willPlayNext = !!shift.localFinished && !shift.spectatorUntilNext;
+        
+        // Check for winner in competitive mode
+        if (shift.competitiveMode && !shift.gameOver) {
+          // Count how many players finished this round
+          const finisherCount = shift.playersFinished.size;
+          // Use the stored count of players who started this round
+          const playersWhoStartedRound = shift.playersAtRoundStart || shift.playersAlive.size;
+          
+          // Debug logging
+          console.log(`Competitive round ended: ${finisherCount} finished out of ${playersWhoStartedRound} who started`);
+          console.log('Finishers:', Array.from(shift.playersFinished));
+          
+          // Only declare a winner if exactly 1 player finished and others were eliminated
+          // This means: only 1 person succeeded while everyone else failed
+          if (finisherCount === 1 && playersWhoStartedRound > 1) {
+            // Check that other players actually had a chance to finish (were alive at round start)
+            // If only 1 finished out of multiple who started, they win!
+            shift.gameOver = true;
+            const winnerId = Array.from(shift.playersFinished)[0];
+            const winnerName = winnerId === 'local' ? (state.playerName || 'Player') : 
+                               (netPlayers.get(winnerId)?.name || `Player ${winnerId}`);
+            shift.gameWinner = winnerName;
+            
+            // Broadcast victory to all clients
+            try {
+              if (typeof Net !== 'undefined' && Net.id) {
+                Net.send({ t: 'comp_victory', winner: winnerName, winnerId: winnerId });
+              }
+            } catch(_) {}
+            
+            // Show victory for host
+            if (winnerId === 'local') {
+              showVictoryMessage(winnerName);
+              // Teleport winner to spectator area
+              state.p.x = 52 * TILE;
+              state.p.y = 77 * TILE;
+            }
+            
+            // End the game - no more rounds
+            shift.nextRoundAt = 0;
+            shift.roundActive = false;
+            shift.statusText = `${winnerName} wins!`;
+            return; // Don't continue to next round
+          } else if (finisherCount === 0 && playersWhoStartedRound > 0) {
+            // Special case: nobody finished - it's a draw/everyone loses
+            shift.gameOver = true;
+            shift.gameWinner = 'Nobody';
+            shift.statusText = 'Nobody wins - all eliminated!';
+            
+            // Broadcast draw to all clients
+            try {
+              if (typeof Net !== 'undefined' && Net.id) {
+                Net.send({ t: 'comp_victory', winner: 'Nobody', winnerId: null });
+              }
+            } catch(_) {}
+            
+            return; // End the game
+          }
+          // If multiple people finished, continue to the next round with those players
+        }
         // Check if one player remaining
         if (shift.playersAlive.size <= 1) {
           // Single-player: advance difficulty instead of resetting to 1
@@ -3222,6 +3513,11 @@ if (startBtn) {
       await loadShiftDBOnce();
       // Refill any coin-door exit spaces with solid block 16
       
+      // Disable competitive mode for regular games
+      shift.competitiveMode = false;
+      shift.gameOver = false;
+      shift.gameWinner = null;
+      
       // Prepare round at level 1 with random box but do not teleport yet
       shift.curLevel = 1;
       {
@@ -3263,6 +3559,79 @@ if (startBtn) {
   });
 }
 // Save map / Clear local map buttons
+// Start competitive game button
+const startCompBtn = document.getElementById('startCompGame');
+if (startCompBtn) {
+  startCompBtn.addEventListener('click', async () => {
+    try {
+      // Only the authoritative host can start the game
+      if (!isAuthoritativeHost()) { 
+        shift.statusText = 'Only the host can start competitive games'; 
+        return; 
+      }
+      if (shift._startingClickLock) return;
+      shift._startingClickLock = true;
+      setTimeout(() => { try { shift._startingClickLock = false; } catch(_){} }, 500);
+      
+      // Ensure DBs are loaded
+      await loadShiftDBOnce();
+      
+      // Enable competitive mode
+      shift.competitiveMode = true;
+      shift.gameOver = false;
+      shift.gameWinner = null;
+      shift.playersAtRoundStart = 0;
+      
+      // Prepare round at level 1 with random box but do not teleport yet
+      shift.curLevel = 1;
+      {
+        let nb3;
+        do { nb3 = Math.floor(Math.random()*12) + 1; } while (nb3 === shift.curBox);
+        shift.curBox = nb3;
+      }
+      placeShiftBox(shift.curLevel, shift.curBox);
+      
+      // Countdown start (5s). Broadcast using wall-clock to avoid drift.
+      const startAtWall = Date.now() + (shift.startCountdownMs||5000);
+      shift.pendingStartAt = performance.now() + (shift.startCountdownMs||5000);
+      
+      // Starting a game means server is not idle
+      shift._serverIdle = false;
+      
+      // Round 1: ensure local flags are cleared immediately
+      shift.spectatorUntilNext = false;
+      shift.spectateNextRound = false;
+      shift.localFinished = false;
+      shift._pendingFirstRound = true;
+      shift._alreadyMovedToSpectator = false;
+      
+      // Move host to spectator spawn immediately for countdown
+      state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+      
+      // Announce competitive game start to peers
+      try {
+        if (typeof Net !== 'undefined' && Net.id) {
+          Net.send({ t: 'comp_start' }); // Notify competitive mode
+          Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox });
+          Net.send({ t: 'shift_start', level: shift.curLevel, box: shift.curBox, startAtWall, firstRound: true });
+          if (shift._goTimeoutId) { try { clearTimeout(shift._goTimeoutId); } catch(_){} }
+          shift._goTimeoutId = setTimeout(() => { try { Net.send({ t: 'shift_go' }); } catch(_){} }, (shift.startCountdownMs||5000));
+        }
+      } catch(_){ }
+      
+      shift.statusText = 'COMPETITIVE: Starting in 5';
+      shift.roundActive = false; shift.firstFinishTime = 0; shift.finishedName = '';
+      // Include all connected players for competitive mode
+      shift.playersAlive = new Set(['local', ...Array.from(netPlayers.keys())]);
+      shift.playersFinished.clear();
+      state.coins = 0; state.blueCoins = 0;
+      
+      // Stay at spectator spawn during countdown
+      state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+    } catch (_) {}
+  });
+}
+
 const saveMapBtn = document.getElementById('saveMap');
 if (saveMapBtn) saveMapBtn.addEventListener('click', () => { try { saveCurrentMapToLocal(); } catch(_){} });
 const clearMapBtn = document.getElementById('clearLocalMap');
