@@ -1,0 +1,30 @@
+{
+  "name": "eeio",
+  "version": "1.0.0",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "build": "echo 'No build step needed'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Wmoook/eeio.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Wmoook/eeio/issues"
+  },
+  "homepage": "https://github.com/Wmoook/eeio#readme",
+  "description": "",
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
+  }
+}
