@@ -1137,6 +1137,97 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
+// Also react to orientation change on mobile
+try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
+
+// Mobile helpers: detect simple mobile view and wire minimal controls
+(function setupMobile(){
+  try {
+    const isMobile = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent) || (Math.min(window.innerWidth, window.innerHeight) < 700);
+    const leftTools = document.getElementById('left-tools');
+    const hud = document.getElementById('hud');
+    const coinHud = document.getElementById('coinHud');
+    const netHud = document.getElementById('netHud');
+    const mobile = document.getElementById('mobileControls');
+    if (!isMobile || !mobile) return;
+    // Hide desktop HUD/left tools on mobile
+    if (leftTools) leftTools.style.display = 'none';
+    if (hud) hud.style.display = 'none';
+    if (coinHud) coinHud.style.display = 'none';
+    // Keep only connect controls and mobile UI
+    if (netHud) {
+      netHud.style.left = '50%';
+      netHud.style.bottom = 'auto';
+      netHud.style.top = '8px';
+      netHud.style.transform = 'translateX(-50%)';
+    }
+    mobile.style.display = 'block';
+
+    // Wire mobile connect
+    const mRoom = document.getElementById('mobileRoom');
+    const mConn = document.getElementById('mobileConnect');
+    if (mConn) mConn.addEventListener('click', ()=>{
+      try {
+        const roomInput = document.getElementById('roomInput');
+        if (roomInput && mRoom) roomInput.value = mRoom.value || 'lobby';
+        const btn = document.getElementById('connectBtn');
+        if (btn) btn.click();
+      } catch(_) {}
+    });
+    // Wire mobile Start / Start Comp
+    const mStart = document.getElementById('mobileStart');
+    const mStartComp = document.getElementById('mobileStartComp');
+    if (mStart) mStart.addEventListener('click', ()=>{ const b = document.getElementById('startGame'); if (b) b.click(); });
+    if (mStartComp) mStartComp.addEventListener('click', ()=>{ const b = document.getElementById('startCompGame'); if (b) b.click(); });
+    // Wire mobile jump button -> Space
+    const mJump = document.getElementById('mobileJump');
+    if (mJump) {
+      const press = ()=>{ state.input.jumpJP = true; state.p.spaceHeld = true; };
+      const release = ()=>{ state.p.spaceHeld = false; state.input.jump = false; };
+      mJump.addEventListener('pointerdown', (e)=>{ e.preventDefault(); press(); });
+      mJump.addEventListener('pointerup', (e)=>{ e.preventDefault(); release(); });
+      mJump.addEventListener('pointerleave', (e)=>{ e.preventDefault(); release(); });
+    }
+    // Virtual joystick
+    const area = document.getElementById('joyArea');
+    const knob = document.getElementById('joyKnob');
+    if (area && knob) {
+      const center = ()=>({ x: area.clientWidth/2, y: area.clientHeight/2 });
+      const clamp = (v, m)=> Math.max(-m, Math.min(m, v));
+      const updateDir = (dx, dy)=>{
+        const dead = 8;
+        state.input.left = dx < -dead; state.input.right = dx > dead;
+        state.input.up = dy < -dead; state.input.down = dy > dead;
+        // update priority for smoothness
+        state.input.hPri = state.input.right ? 1 : (state.input.left ? -1 : 0);
+        state.input.vPri = state.input.down ? 1 : (state.input.up ? -1 : 0);
+      };
+      const setKnob = (dx, dy)=>{
+        const maxR = 40;
+        const rx = clamp(dx, maxR); const ry = clamp(dy, maxR);
+        knob.style.left = `calc(50% + ${rx}px)`;
+        knob.style.top = `calc(50% + ${ry}px)`;
+      };
+      let active = false;
+      area.addEventListener('pointerdown', (e)=>{
+        active = true; area.setPointerCapture(e.pointerId);
+        const c = center(); const rect = area.getBoundingClientRect();
+        const dx = (e.clientX - rect.left) - c.x; const dy = (e.clientY - rect.top) - c.y;
+        setKnob(dx, dy); updateDir(dx, dy);
+      });
+      area.addEventListener('pointermove', (e)=>{
+        if (!active) return;
+        const c = center(); const rect = area.getBoundingClientRect();
+        const dx = (e.clientX - rect.left) - c.x; const dy = (e.clientY - rect.top) - c.y;
+        setKnob(dx, dy); updateDir(dx, dy);
+      });
+      const end = (e)=>{ active = false; try{ area.releasePointerCapture(e.pointerId);}catch(_){}; setKnob(0,0); updateDir(0,0); };
+      area.addEventListener('pointerup', end);
+      area.addEventListener('pointercancel', end);
+      area.addEventListener('pointerleave', end);
+    }
+  } catch(_) {}
+})();
 
 function clampViewToBounds() {
   // No clamping. You can pan/zoom anywhere.
@@ -1485,15 +1576,20 @@ function initNetworking(){
       if (shift && !shift.localFinished && from === Net.id) {
         // ignore echo for local client. handled on local path
       }
-      if (shift && shift.playersFinished) shift.playersFinished.add(from||'peer');
+      const pid = from || 'peer';
+      if (shift && shift.playersFinished) shift.playersFinished.add(pid);
       if (shift && shift.playersAlive && from) shift.playersAlive.delete(from);
       // In competitive mode, ensure we have a finish time for this peer
       if (shift && shift.competitiveMode) {
-        const pid = from||'peer';
         if (!shift.finishTimes) shift.finishTimes = new Map();
         if (!shift.finishTimes.has(pid)) {
           const t = Math.max(0, Date.now() - (shift.roundStartWall||Date.now()));
           shift.finishTimes.set(pid, t);
+        }
+        // Ensure participantsAtRoundStart is initialized, so HUD denominator is stable
+        if (!shift.participantsAtRoundStart || !(shift.participantsAtRoundStart instanceof Set) || shift.participantsAtRoundStart.size === 0) {
+          shift.participantsAtRoundStart = new Set([ 'local', ...Array.from(netPlayers.keys()) ]);
+          shift.playersAtRoundStart = shift.participantsAtRoundStart.size;
         }
       }
     } catch(_) {}
@@ -1508,10 +1604,14 @@ function initNetworking(){
     } catch(_) {}
   });
   // Force start now (host pulse) to eliminate drift
-  Net.on('shift_go', ({ spawnX, spawnY } = {}) => {
-    // Track how many players are starting this round (for competitive mode)
-    if (shift.competitiveMode) {
-      shift.playersAtRoundStart = shift.playersAlive.size;
+  Net.on('shift_go', ({ spawnX, spawnY, participants } = {}) => {
+    // Track who is starting this round (host provided when available)
+    if (participants && Array.isArray(participants)) {
+      shift.participantsAtRoundStart = new Set(participants);
+      shift.playersAtRoundStart = participants.length;
+    } else if (shift.competitiveMode) {
+      shift.participantsAtRoundStart = new Set(shift.playersAlive ? Array.from(shift.playersAlive) : []);
+      shift.playersAtRoundStart = shift.participantsAtRoundStart.size;
     }
     
     // If this client joined mid-round or countdown, or was eliminated, do not move or change state (unless first round is pending)
@@ -1532,6 +1632,8 @@ function initNetworking(){
     state.coins = 0; state.blueCoins = 0;
     // Reset per-round timing map
     shift.finishTimes = new Map();
+    // Reset finished set for the new round so HUD starts at 0/X
+    try { shift.playersFinished = new Set(); } catch(_) {}
     // Clear first-round pending marker after GO processes once
     if (shift) shift._pendingFirstRound = false;
   });
@@ -1624,15 +1726,24 @@ function initNetworking(){
   });
   
   // Competitive game victory announcement
-  Net.on('comp_victory', ({ winner }) => {
+  Net.on('comp_victory', ({ winner, winnerId }) => {
     if (shift.competitiveMode && !shift.gameOver) {
       shift.gameOver = true;
       shift.gameWinner = winner;
       showVictoryMessage(winner);
       shift.statusText = `${winner} wins!`;
+      // Fully stop any pending round transitions to avoid freeze on losers
+      shift.firstFinishTime = 0;
+      shift.graceEnd = 0;
+      shift.pendingStartAt = 0;
+      shift.nextRoundAt = 0;
+      shift.roundActive = false;
       // Move all players to spectator area
-      state.p.x = 52 * TILE;
-      state.p.y = 77 * TILE;
+      try {
+        if (winnerId !== 'local') {
+          state.p.x = 52 * TILE; state.p.y = 77 * TILE; shift.spectatorUntilNext = true;
+        }
+      } catch(_) {}
     }
   });
   
@@ -2764,7 +2875,7 @@ function tick() {
         openAllCoinDoors();
       }
       // If inside play box and coin requirement met, mark finish when touching red-door stand-in
-      if (shift && shift.roundActive) {
+      if (shift && shift.roundActive && !shift.spectatorUntilNext) {
         const inBox = (cx >= shift.dst.x0 && cx <= shift.dst.x1 && cy >= shift.dst.y0 && cy <= shift.dst.y1);
         if (inBox && state.coins >= (shift.curCoinReq||0)) {
           // Detect reaching red door stand-in (we used solid id 43 as stand-in on foreground)
@@ -2790,7 +2901,7 @@ function tick() {
             // Open coin doors: convert FG id 43 at all border positions to id 136 (open coin door sprite, non-blocking)
             openAllCoinDoors();
             if (!shift.firstFinishTime) {
-              // First finisher of the round: start grace for everyone
+            // First finisher of the round: start grace for everyone
               shift.firstFinishTime = performance.now();
               shift.graceEnd = shift.firstFinishTime + (shift.graceMs||30000);
               shift.finished = true;
@@ -2827,7 +2938,7 @@ function tick() {
                 }
               } catch(_) {}
               state.p.x = 51 * TILE; state.p.y = 75 * TILE;
-            } else if (shift.localFinished && shift.firstFinishTime) {
+            } else if (shift.localFinished && shift.firstFinishTime && !shift.spectatorUntilNext) {
               // Already marked as finished but ensure we're at winner staging during grace
               // This handles edge cases where localFinished might be set but player wasn't teleported
               const atStaging = Math.abs(state.p.x - 51 * TILE) < 16 && Math.abs(state.p.y - 75 * TILE) < 16;
@@ -2852,7 +2963,7 @@ function tick() {
   state.onLadder = !!touchingLadder;
   // If coins requirement met and player exits the box
   // Only use outside-box path when coins are required (to avoid false triggers at round start)
-  if (shift && shift.roundActive && (shift.curCoinReq||0) > 0 && (state.coins|0) >= (shift.curCoinReq||0)) {
+  if (shift && shift.roundActive && !shift.spectatorUntilNext && (shift.curCoinReq||0) > 0 && (state.coins|0) >= (shift.curCoinReq||0)) {
     const inside = (cx >= shift.dst.x0 && cx <= shift.dst.x1 && cy >= shift.dst.y0 && cy <= shift.dst.y1);
     if (!inside) {
       openAllCoinDoors();
@@ -2892,7 +3003,7 @@ function tick() {
           }
         } catch(_) {}
         state.p.x = 51 * TILE; state.p.y = 75 * TILE;
-      } else if (shift.localFinished && shift.firstFinishTime) {
+      } else if (shift.localFinished && shift.firstFinishTime && !shift.spectatorUntilNext) {
         // Already marked as finished but ensure we're at winner staging during grace
         const atStaging = Math.abs(state.p.x - 51 * TILE) < 16 && Math.abs(state.p.y - 75 * TILE) < 16;
         if (!atStaging) {
@@ -3083,6 +3194,9 @@ function loop() {
         if (allowTeleport) {
           // Set round start wall-clock immediately for host so local timing isn't 0
           shift.roundStartWall = Date.now();
+          // Reset per-round tracking on host immediately so HUD shows 0/Y
+          shift.finishTimes = new Map();
+          try { shift.playersFinished = new Set(); } catch(_) {}
           const target = getEntranceSpawnFallback();
           state.p.x = target.x * TILE; state.p.y = target.y * TILE;
           shift.roundActive = true;
@@ -3093,8 +3207,15 @@ function loop() {
         try {
           if (typeof Net !== 'undefined' && Net.id) {
             const tpos = getEntranceSpawnFallback();
+            // Winners from this round become participants: map 'local' to host id
+            let participants = Array.from(shift.playersFinished || []);
+            participants = participants.map(pid => pid === 'local' ? Net.id : pid);
+            if (!participants.length) {
+              // Fallback to everyone alive if winners not tracked
+              participants = Array.from(shift.playersAlive || new Set(['local', ...Array.from(netPlayers.keys())])).map(pid => pid === 'local' ? Net.id : pid);
+            }
             Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox, spawnX: tpos.x|0, spawnY: tpos.y|0 });
-            Net.send({ t: 'shift_go', spawnX: tpos.x|0, spawnY: tpos.y|0 });
+            Net.send({ t: 'shift_go', spawnX: tpos.x|0, spawnY: tpos.y|0, participants });
           }
         } catch(_){ }
         // Clear first-round pending marker after processing
@@ -3133,13 +3254,20 @@ function loop() {
       // Host-only logic for round transition
       if (isAuthoritativeHost()) {
         // Start countdown "next round in 5..1" and teleport winners to start
-        if (!shift.nextRoundAt) {
+            if (!shift.nextRoundAt) {
           shift.nextRoundAt = now + shift.nextRoundCountdownMs;
           // Round just ended: backfill coin-door exits immediately at grace end
           const prevExitsEnd = new Map(shift.coinDoorExits || []);
           fillCoinDoorExitsWithBlock16();
           // preserve the snapshot for after placement as well
           shift._prevRoundExits = prevExitsEnd;
+              // If no finishers at grace end, end competitively as 'Nobody'
+              if (shift.competitiveMode && (shift.playersFinished?.size||0) === 0) {
+                shift.gameOver = true;
+                shift.gameWinner = 'Nobody';
+                shift.statusText = 'Nobody wins - all eliminated!';
+                try { if (typeof Net !== 'undefined' && Net.id) Net.send({ t: 'comp_victory', winner: 'Nobody', winnerId: null }); } catch(_) {}
+              }
         }
       } else {
         // Non-host clients: just wait for next round placement from host
@@ -3160,62 +3288,51 @@ function loop() {
         
         // Check for winner in competitive mode
         if (shift.competitiveMode && !shift.gameOver) {
-          // Count how many players finished this round
-          const finisherCount = shift.playersFinished.size;
-          // Use the stored count of players who started this round
-          const playersWhoStartedRound = shift.playersAtRoundStart || shift.playersAlive.size;
-          
-          // Debug logging
-          console.log(`Competitive round ended: ${finisherCount} finished out of ${playersWhoStartedRound} who started`);
-          console.log('Finishers:', Array.from(shift.playersFinished));
-          
-          // Only declare a winner if exactly 1 player finished and others were eliminated
-          // This means: only 1 person succeeded while everyone else failed
-          if (finisherCount === 1 && playersWhoStartedRound > 1) {
-            // Check that other players actually had a chance to finish (were alive at round start)
-            // If only 1 finished out of multiple who started, they win!
+          // Participants who started this round (canonical set)
+          const participantsSet = (shift.participantsAtRoundStart instanceof Set && shift.participantsAtRoundStart.size)
+            ? new Set(shift.participantsAtRoundStart)
+            : new Set(['local', ...Array.from(netPlayers.keys())]);
+          const participantsCount = participantsSet.size;
+          // Build a normalized set of finishers intersected with participants
+          const finishers = new Set();
+          for (const id of (shift.playersFinished || new Set())) {
+            if (participantsSet.has(id)) finishers.add(id);
+          }
+          const finisherCount = finishers.size;
+          const losersCount = Math.max(0, participantsCount - finisherCount);
+
+          // Only declare a winner if exactly 1 participant finished and at least 1 participant did not
+          if (finisherCount === 1 && losersCount >= 1) {
             shift.gameOver = true;
-            const winnerId = Array.from(shift.playersFinished)[0];
+            const winnerId = Array.from(finishers)[0];
             const winnerName = winnerId === 'local' ? (state.playerName || 'Player') : 
                                (netPlayers.get(winnerId)?.name || `Player ${winnerId}`);
             shift.gameWinner = winnerName;
-            
             // Broadcast victory to all clients
             try {
               if (typeof Net !== 'undefined' && Net.id) {
-                Net.send({ t: 'comp_victory', winner: winnerName, winnerId: winnerId });
+                Net.send({ t: 'comp_victory', winner: winnerName, winnerId });
               }
             } catch(_) {}
-            
-            // Show victory for host
-            if (winnerId === 'local') {
-              showVictoryMessage(winnerName);
-              // Teleport winner to spectator area
-              state.p.x = 52 * TILE;
-              state.p.y = 77 * TILE;
-            }
-            
-            // End the game - no more rounds
+            // Show victory for host and stop further transitions
+            if (winnerId === 'local') showVictoryMessage(winnerName);
             shift.nextRoundAt = 0;
             shift.roundActive = false;
             shift.statusText = `${winnerName} wins!`;
-            return; // Don't continue to next round
-          } else if (finisherCount === 0 && playersWhoStartedRound > 0) {
-            // Special case: nobody finished - it's a draw/everyone loses
+            return;
+          } else if (finisherCount === 0 && participantsCount > 0) {
+            // Special case: nobody finished - it's a draw
             shift.gameOver = true;
             shift.gameWinner = 'Nobody';
             shift.statusText = 'Nobody wins - all eliminated!';
-            
-            // Broadcast draw to all clients
             try {
               if (typeof Net !== 'undefined' && Net.id) {
                 Net.send({ t: 'comp_victory', winner: 'Nobody', winnerId: null });
               }
             } catch(_) {}
-            
-            return; // End the game
+            return;
           }
-          // If multiple people finished, continue to the next round with those players
+          // Multiple finishers: continue to next round (no early end)
         }
         // Check if one player remaining
         if (shift.playersAlive.size <= 1) {
@@ -3244,9 +3361,17 @@ function loop() {
             try { 
               if (typeof Net !== 'undefined' && Net.id) {
                 const ent = getEntranceSpawnFallback();
+                // Winners only become participants for next round
+                let participants = Array.from(shift.playersFinished || []);
+                participants = participants.map(pid => pid === 'local' ? Net.id : pid);
+                if (!participants.length) participants = [Net.id];
+                // Reset per-round tracking on host before sending GO
+                shift.roundStartWall = Date.now();
+                shift.finishTimes = new Map();
+                try { shift.playersFinished = new Set(); } catch(_) {}
                 Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox, spawnX: ent.x, spawnY: ent.y });
                 // Send immediate go signal for round 2+ (no countdown)
-                Net.send({ t: 'shift_go', spawnX: ent.x, spawnY: ent.y });
+                Net.send({ t: 'shift_go', spawnX: ent.x, spawnY: ent.y, participants });
               }
             } catch(_){ }
           }
@@ -3296,9 +3421,16 @@ function loop() {
             try { 
               if (typeof Net !== 'undefined' && Net.id) {
                 const ent = getEntranceSpawnFallback();
+                let participants = Array.from(shift.playersFinished || []);
+                participants = participants.map(pid => pid === 'local' ? Net.id : pid);
+                if (!participants.length) participants = [Net.id];
+                // Reset per-round tracking on host before sending GO
+                shift.roundStartWall = Date.now();
+                shift.finishTimes = new Map();
+                try { shift.playersFinished = new Set(); } catch(_) {}
                 Net.send({ t: 'shift_place', level: shift.curLevel, box: shift.curBox, spawnX: ent.x, spawnY: ent.y });
                 // Send immediate go signal for round 2+ (no countdown)
-                Net.send({ t: 'shift_go', spawnX: ent.x, spawnY: ent.y });
+                Net.send({ t: 'shift_go', spawnX: ent.x, spawnY: ent.y, participants });
               }
             } catch(_){ }
           }
@@ -3322,8 +3454,35 @@ function loop() {
         }
         // New round: keep eliminated players spectating until a new Start Game is pressed
         // Winners will have localFinished cleared on shift_start for the next game
-      }
-    }
+          }
+        }
+      } else if (now >= shift.nextRoundAt && !isAuthoritativeHost()) {
+        // Non-host clients: mirror victory display locally if host packet is delayed/missed
+        if (shift.competitiveMode && !shift.gameOver) {
+          const finisherCount = shift.playersFinished ? shift.playersFinished.size : 0;
+          const playersWhoStartedRound = shift.playersAtRoundStart || 0;
+          if (finisherCount === 1 && playersWhoStartedRound > 1) {
+            const winnerId = Array.from(shift.playersFinished)[0];
+            const winnerName = winnerId === 'local' ? (state.playerName || 'Player') : (netPlayers.get(winnerId)?.name || `Player ${winnerId}`);
+            // Avoid double-processing if comp_victory will arrive shortly; still, ensure we do not freeze UI
+            if (!shift.gameOver) {
+              showVictoryMessage(winnerName);
+              shift.statusText = `${winnerName} wins!`;
+              shift.gameOver = true;
+              // Fully stop transitions
+              shift.firstFinishTime = 0;
+              shift.graceEnd = 0;
+              shift.pendingStartAt = 0;
+              shift.nextRoundAt = 0;
+              shift.roundActive = false;
+              // Teleport eliminated (non-winner) to spectator
+              if (winnerId !== 'local') {
+                state.p.x = 52 * TILE; state.p.y = 77 * TILE;
+                shift.spectatorUntilNext = true;
+              }
+            }
+          }
+        }
   }
   // Smooth zoom step (avoid using now-last; use a fixed interpolation for stability)
   if (view.zoomActive) {

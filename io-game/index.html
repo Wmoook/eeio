@@ -45,7 +45,7 @@
       <div>Blue Coins: <span id="blueCount" class="v">0</span></div>
     </div>
       <!-- Multiplayer UI -->
-      <div id="netHud" style="position: fixed; bottom: 8px; left: 8px; z-index: 9999; background: rgba(0,0,0,.4); padding: 6px 8px; border-radius: 8px; font-size: 12px; line-height: 1.4; color: #fff;">
+       <div id="netHud" style="position: fixed; bottom: 8px; left: 8px; z-index: 9999; background: rgba(0,0,0,.4); padding: 6px 8px; border-radius: 8px; font-size: 12px; line-height: 1.4; color: #fff;">
         <div style="display:flex; gap:6px; align-items:center;">
           <label>Room:</label>
           <input id="roomInput" value="lobby" style="width:120px; background:#222; color:#eee; border:1px solid #555; border-radius:4px; padding:2px 4px;">
@@ -53,7 +53,7 @@
           <span id="netStatus" style="margin-left:6px; color:#bbb;">offline</span>
         </div>
       </div>
-      <div id="left-tools">
+       <div id="left-tools">
       <div id="resetView" class="tool" title="Reset camera to default view">Reset View</div>
       <div id="togglePalette" class="tool" title="Toggle block palette (God/Edit)">Palette</div>
         <div id="startGame" class="tool" title="Start Shift Game">Start Game</div>
@@ -61,6 +61,27 @@
         <div id="saveMap" class="tool" title="Save current play map to browser and download">Save Map</div>
         <div id="clearLocalMap" class="tool" title="Clear saved map from browser">Clear Local Map</div>
         <div id="exportEELVL" class="tool" title="Export full world as .eelvl">Export .eelvl</div>
+    </div>
+    <!-- Mobile controls (hidden on desktop) -->
+    <div id="mobileControls" style="display:none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 10000; padding: 8px;">
+      <div style="display:flex; justify-content: space-between; align-items: flex-end; gap: 8px;">
+        <!-- Left: virtual joystick -->
+        <div id="joyArea" style="position: relative; width: 140px; height: 140px; border-radius: 50%; background: rgba(255,255,255,0.06); border: 1px solid #555;">
+          <div id="joyKnob" style="position:absolute; left:50%; top:50%; width:64px; height:64px; transform:translate(-50%,-50%); border-radius:50%; background: rgba(255,255,255,0.2); border:1px solid #888;"></div>
+        </div>
+        <!-- Right: buttons -->
+        <div style="display:flex; flex-direction: column; gap:8px; align-items:flex-end;">
+          <div style="display:flex; gap:8px;">
+            <button id="mobileStart" style="padding:8px 12px; border-radius:8px; background:#2d6; color:#fff; border:1px solid #285;">Start</button>
+            <button id="mobileStartComp" style="padding:8px 12px; border-radius:8px; background:#c62; color:#fff; border:1px solid #a40;">Start Comp</button>
+          </div>
+          <button id="mobileJump" style="padding:14px 20px; border-radius:50px; background:#357; color:#fff; border:1px solid #244; font-size:16px;">Jump</button>
+        </div>
+      </div>
+      <div style="position: absolute; left: 50%; transform: translateX(-50%); bottom: 8px; display:flex; gap:8px;">
+        <input id="mobileRoom" value="lobby" style="width:160px; background:#222; color:#eee; border:1px solid #555; border-radius:4px; padding:6px 8px;">
+        <button id="mobileConnect" style="background:#2d6; color:#fff; border:1px solid #285; border-radius:6px; padding:6px 10px; cursor:pointer;">Connect</button>
+      </div>
     </div>
       <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
       <!-- Local vendored AMF3 decoder (avoid CDN MIME nosniff issues) -->
