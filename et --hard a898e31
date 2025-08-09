@@ -1,0 +1,10 @@
+[33m6e08249[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Fix exit detection for multiple players - detect both closed (43) and open (136) coin doors
+[33m22a710b[m Fix exit detection by syncing coinDoors positions across all clients
+[33m973c64b[m Fix entrance spawn synchronization across multiplayer clients
+[33m211584e[m Add Dockerfile for Railway deployment - fix npm ci issues
+[33mde2ebcf[m Fix Railway deployment configuration - use npm install instead of npm ci
+[33ma898e31[m railway
+[33mc9a398d[m working shift
+[33m3215dd4[m multi
+[33m1c28fba[m spectator when not in round
+[33m43b9ace[m movement
