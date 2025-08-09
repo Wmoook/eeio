@@ -1176,11 +1176,17 @@ function drawNetPlayers(){
   if (typeof Net === 'undefined') return;
   for (const [id, pl] of netPlayers) {
     if (!pl) continue;
+    // Smooth remote positions to avoid choppy movement
+    if (typeof pl.sx !== 'number' || typeof pl.sy !== 'number') { pl.sx = pl.x||0; pl.sy = pl.y||0; }
+    const dx = (pl.x||0) - pl.sx; const dy = (pl.y||0) - pl.sy;
+    const dist2 = dx*dx + dy*dy;
+    if (dist2 > (64*64)) { pl.sx = pl.x||0; pl.sy = pl.y||0; } // snap on teleports/large gaps
+    else { pl.sx += dx * 0.2; pl.sy += dy * 0.2; }
     if (smileyImg.complete) {
       const sx = (pl.faceIndex||0) * FACE_SIZE;
       const sy = 0;
-      const rx = Math.floor((pl.x||0) - 5);
-      const ry = Math.floor((pl.y||0) - 5);
+      const rx = Math.floor((pl.sx||0) - 5);
+      const ry = Math.floor((pl.sy||0) - 5);
       ctx.drawImage(smileyImg, sx, sy, FACE_SIZE, FACE_SIZE, rx, ry, FACE_SIZE, FACE_SIZE);
       const name = pl.name || `P${id}`;
       if (name) {
@@ -1189,8 +1195,8 @@ function drawNetPlayers(){
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.font = '10px system-ui, Arial';
         const tw = ctx.measureText(name).width;
-        const cx = Math.floor((pl.x||0) + 8 - tw/2);
-        const cy = Math.floor((pl.y||0) + 20 + 10);
+        const cx = Math.floor((pl.sx||0) + 8 - tw/2);
+        const cy = Math.floor((pl.sy||0) + 20 + 10);
         ctx.fillRect(cx - 3, cy - 9, tw + 6, 12);
         ctx.fillStyle = '#fff';
         ctx.fillText(name, cx, cy);
@@ -1276,6 +1282,8 @@ function initNetworking(){
     if (!from) return;
     const pl = netPlayers.get(from) || {};
     pl.x = x|0; pl.y = y|0; pl.faceIndex = faceIndex|0; if (name) pl.name = name;
+    // Initialize smoothing targets if needed
+    if (typeof pl.sx !== 'number' || typeof pl.sy !== 'number') { pl.sx = pl.x; pl.sy = pl.y; }
     netPlayers.set(from, pl);
   });
   // Keys are global; update timers when any client triggers
