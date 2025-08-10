@@ -3314,12 +3314,16 @@ function loop() {
                 Net.send({ t: 'comp_victory', winner: winnerName, winnerId });
               }
             } catch(_) {}
-            // Show victory for host and stop further transitions
-            if (winnerId === 'local') showVictoryMessage(winnerName);
+            // Show victory message locally for both winner and eliminated host
+            showVictoryMessage(winnerName);
             shift.nextRoundAt = 0;
             shift.roundActive = false;
             shift.statusText = `${winnerName} wins!`;
-            return;
+            // If local is eliminated on host, move to spectator area
+            if (winnerId !== 'local') {
+              try { state.p.x = 52 * TILE; state.p.y = 77 * TILE; shift.spectatorUntilNext = true; } catch(_) {}
+            }
+            // Do not early-return; keep the frame loop alive
           } else if (finisherCount === 0 && participantsCount > 0) {
             // Special case: nobody finished - it's a draw
             shift.gameOver = true;
@@ -3330,12 +3334,12 @@ function loop() {
                 Net.send({ t: 'comp_victory', winner: 'Nobody', winnerId: null });
               }
             } catch(_) {}
-            return;
+            // Do not early-return; keep the frame loop alive
           }
           // Multiple finishers: continue to next round (no early end)
         }
         // Check if one player remaining
-        if (shift.playersAlive.size <= 1) {
+        if (!shift.gameOver && shift.playersAlive.size <= 1) {
           // Single-player: advance difficulty instead of resetting to 1
           shift.curLevel = Math.min(7, shift.curLevel + 1);
           {
@@ -3355,7 +3359,7 @@ function loop() {
             }
           } catch(_){}
           // At placement time, we already backfilled at grace end; avoid double
-          if (isAuthoritativeHost()) {
+          if (!shift.gameOver && isAuthoritativeHost()) {
             placeShiftBox(shift.curLevel, shift.curBox);
             // Send placement and immediate start (no countdown for round 2+)
             try { 
@@ -3378,7 +3382,7 @@ function loop() {
           // If a snapshot exists, selectively backfill only those not reused by new box
           if (shift._prevRoundExits) { fillOldCoinDoorExitsExceptCurrent(shift._prevRoundExits); shift._prevRoundExits = null; }
           const ent = getEntranceSpawnFallback();
-          if (willPlayNext) {
+          if (!shift.gameOver && willPlayNext) {
             state.p.x = ent.x * TILE; state.p.y = ent.y * TILE;
             state.coins = 0; state.blueCoins = 0;
             shift.roundActive = true;
@@ -3395,7 +3399,7 @@ function loop() {
           shift.localFinished = false;
           // Reset the movement flag for the next round (but eliminated players stay eliminated)
           shift._alreadyMovedToSpectator = false;
-        } else {
+        } else if (!shift.gameOver) {
           // Advance to next level; randomly pick a box 1..12, place new box, then teleport
           shift.curLevel = Math.min(7, shift.curLevel + 1);
           {
@@ -3415,7 +3419,7 @@ function loop() {
             }
           } catch(_){}
           // At placement time, we already backfilled at grace end; avoid double
-          if (isAuthoritativeHost()) {
+          if (!shift.gameOver && isAuthoritativeHost()) {
             placeShiftBox(shift.curLevel, shift.curBox);
             // Send placement and immediate start (no countdown for round 2+)
             try { 
@@ -3436,7 +3440,7 @@ function loop() {
           }
           if (shift._prevRoundExits) { fillOldCoinDoorExitsExceptCurrent(shift._prevRoundExits); shift._prevRoundExits = null; }
           const ent2 = getEntranceSpawnFallback();
-          if (willPlayNext) {
+          if (!shift.gameOver && willPlayNext) {
             state.p.x = ent2.x * TILE; state.p.y = ent2.y * TILE;
             state.coins = 0; state.blueCoins = 0;
             shift.roundActive = true;
