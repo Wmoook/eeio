@@ -1300,9 +1300,12 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
         knob.style.top = `calc(50% + ${ry}px)`;
       };
       let active = false;
+      // On some mobile browsers, pointer events on descendants can bubble oddly; lock to area only
       area.addEventListener('pointerdown', (e)=>{
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
         e.preventDefault(); e.stopPropagation();
-        active = true; area.setPointerCapture(e.pointerId);
+        active = true;
+        try { area.setPointerCapture(e.pointerId); } catch(_) {}
         const c = center(); const rect = area.getBoundingClientRect();
         const dx = (e.clientX - rect.left) - c.x; const dy = (e.clientY - rect.top) - c.y;
         setKnob(dx, dy); updateDir(dx, dy);
@@ -1314,10 +1317,30 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
         const dx = (e.clientX - rect.left) - c.x; const dy = (e.clientY - rect.top) - c.y;
         setKnob(dx, dy); updateDir(dx, dy);
       }, { passive: false });
-      const end = (e)=>{ e.preventDefault(); e.stopPropagation(); active = false; try{ area.releasePointerCapture(e.pointerId);}catch(_){}; setKnob(0,0); updateDir(0,0); };
+      const end = (e)=>{ e && e.preventDefault && e.preventDefault(); e && e.stopPropagation && e.stopPropagation(); active = false; try{ area.releasePointerCapture(e.pointerId);}catch(_){}; setKnob(0,0); updateDir(0,0); };
       area.addEventListener('pointerup', end, { passive: false });
       area.addEventListener('pointercancel', end, { passive: false });
       area.addEventListener('pointerleave', end, { passive: false });
+      // Fallback for browsers sending touch events only
+      area.addEventListener('touchstart', (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        active = true;
+        const t = e.touches[0]; if (!t) return;
+        const c = center(); const rect = area.getBoundingClientRect();
+        const dx = (t.clientX - rect.left) - c.x; const dy = (t.clientY - rect.top) - c.y;
+        setKnob(dx, dy); updateDir(dx, dy);
+      }, { passive: false });
+      area.addEventListener('touchmove', (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        if (!active) return;
+        const t = e.touches[0]; if (!t) return;
+        const c = center(); const rect = area.getBoundingClientRect();
+        const dx = (t.clientX - rect.left) - c.x; const dy = (t.clientY - rect.top) - c.y;
+        setKnob(dx, dy); updateDir(dx, dy);
+      }, { passive: false });
+      const touchEnd = (e)=>{ e.preventDefault(); e.stopPropagation(); active = false; setKnob(0,0); updateDir(0,0); };
+      area.addEventListener('touchend', touchEnd, { passive: false });
+      area.addEventListener('touchcancel', touchEnd, { passive: false });
       // Ensure canvas doesn't steal pointer lock/focus away from joystick on mobile
       try { canvas.style.touchAction = 'none'; } catch(_) {}
     }
