@@ -1145,7 +1145,7 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
   try {
     const isMobile = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i.test(navigator.userAgent) || (Math.min(window.innerWidth, window.innerHeight) < 700);
     const leftTools = document.getElementById('left-tools');
-    const hud = document.getElementById('hud');
+  const hud = document.getElementById('hud');
     const coinHud = document.getElementById('coinHud');
     const netHud = document.getElementById('netHud');
     const mobile = document.getElementById('mobileControls');
@@ -1670,6 +1670,25 @@ function initNetworking(){
       const target = getEntranceSpawnFallback();
       state.p.x = target.x * TILE; state.p.y = target.y * TILE;
     }
+    // Safety: never spawn inside a blocking tile. Nudge up to 4 tiles along open axes.
+    try {
+      if (collidesAt(state.p.x, state.p.y)) {
+        const dirs = [ [0,-1], [1,0], [-1,0], [0,1], [1,-1], [-1,-1], [1,1], [-1,1] ];
+        let fixed = false;
+        for (let step = 1; step <= 4 && !fixed; step++) {
+          for (const [dx,dy] of dirs) {
+            const nx = state.p.x + dx * TILE * step;
+            const ny = state.p.y + dy * TILE * step;
+            if (!collidesAt(nx, ny)) { state.p.x = nx; state.p.y = ny; fixed = true; break; }
+          }
+        }
+        // As last resort, snap to fallback entrance
+        if (!fixed) {
+          const fb = getEntranceSpawnFallback();
+          state.p.x = fb.x * TILE; state.p.y = fb.y * TILE;
+        }
+      }
+    } catch(_) {}
     // Record round start wall clock for timing computations
     shift.roundStartWall = Date.now();
     shift.roundActive = true;
@@ -1907,7 +1926,7 @@ function getEntranceSpawnFallback() {
     if (!base && right.length) { base = pickClosest(right, 'y', centerY); normal = { x: -1, y: 0 }; }
     // If an entrance exists, step inward 1..4 tiles
     if (base) {
-      for (let s = 1; s <= 4; s++) {
+      for (let s = 1; s <= 6; s++) {
         let cx = base.x + normal.x * s;
         let cy = base.y + normal.y * s;
         // Clamp within box bounds
@@ -1915,11 +1934,29 @@ function getEntranceSpawnFallback() {
         if (cy < y0) cy = y0; if (cy > y1) cy = y1;
         if (!isBlockingAt(cx, cy)) return { x: cx, y: cy };
       }
-      // If all candidates blocked, fall back to one tile inward from base
+      // If all candidates blocked, search a small spiral around base inside box
       let fx = base.x + normal.x;
       let fy = base.y + normal.y;
       if (fx < x0) fx = x0; if (fx > x1) fx = x1;
       if (fy < y0) fy = y0; if (fy > y1) fy = y1;
+      if (!isBlockingAt(fx, fy)) return { x: fx, y: fy };
+      const spiralDirs = [ [1,0],[0,1],[-1,0],[0,-1] ];
+      let sx = fx, sy = fy, len = 1, dirIdx = 0, steps = 0;
+      for (let ring = 0; ring < 3; ring++) {
+        for (let r = 0; r < 2; r++) {
+          for (let i = 0; i < len; i++) {
+            sx += spiralDirs[dirIdx][0];
+            sy += spiralDirs[dirIdx][1];
+            if (sx < x0) sx = x0; if (sx > x1) sx = x1;
+            if (sy < y0) sy = y0; if (sy > y1) sy = y1;
+            if (!isBlockingAt(sx, sy)) return { x: sx, y: sy };
+            steps++;
+          }
+          dirIdx = (dirIdx + 1) % 4;
+        }
+        len++;
+      }
+      // Fallback to base if everything is blocked (should be rare)
       return { x: fx, y: fy };
     }
     // No entrances: choose top-center nudged one tile inward
@@ -2311,7 +2348,7 @@ const state = {
   faceIndex: 0, // frame index (26px step in EE, we'll draw 26x26 as in Player.rect2)
   goldBorder: false,
   godMode: false,
-  canEdit: true,
+  canEdit: false,
   autoTrack: false,
   trackPlayer: true,
   auraAnim: { start: 0, playedIntro: false, loopStart: 0 },
@@ -2678,10 +2715,9 @@ function drawPlayer() {
 }
 
 function updateHud() {
-  const dirEl = document.getElementById('gdir');
-  dirEl.textContent = ['down', 'left', 'up', 'right'][state.p.flipGravity];
-  const jEl = document.getElementById('jinfo');
-  jEl.textContent = `${state.p.maxJumps}`;
+  // Hide gravity direction and multi-jump info from HUD
+  const dirEl = document.getElementById('gdir'); if (dirEl) dirEl.style.display = 'none';
+  const jEl = document.getElementById('jinfo'); if (jEl) jEl.style.display = 'none';
   if (state.stats) {
     const fpsEl = document.getElementById('fps');
     const msEl = document.getElementById('ms');
@@ -2691,14 +2727,8 @@ function updateHud() {
   const god = document.getElementById('godBadge');
   const edit = document.getElementById('editBadge');
   const fs = document.getElementById('fsBadge');
-  if (god) {
-    god.textContent = `God: ${state.godMode ? 'ON' : 'OFF'}`;
-    god.className = `badge ${state.godMode ? 'on' : 'off'}`;
-  }
-  if (edit) {
-    edit.textContent = `Edit: ${state.canEdit ? 'ON' : 'OFF'}`;
-    edit.className = `badge ${state.canEdit ? 'on' : 'off'}`;
-  }
+  if (god) { god.style.display = 'none'; }
+  if (edit) { edit.style.display = 'none'; }
   if (fs) {
     const isFs = !!document.fullscreenElement;
     fs.textContent = isFs ? 'Exit Fullscreen' : 'Fullscreen';
@@ -3242,8 +3272,20 @@ function loop() {
           // Reset per-round tracking on host immediately so HUD shows 0/Y
           shift.finishTimes = new Map();
           try { shift.playersFinished = new Set(); } catch(_) {}
+          // Use safe entrance spawn; ensure not inside a blocking tile
           const target = getEntranceSpawnFallback();
           state.p.x = target.x * TILE; state.p.y = target.y * TILE;
+          if (collidesAt(state.p.x, state.p.y)) {
+            const dirs = [ [0,-1], [1,0], [-1,0], [0,1], [1,-1], [-1,-1], [1,1], [-1,1] ];
+            let fixed = false;
+            for (let step = 1; step <= 4 && !fixed; step++) {
+              for (const [dx,dy] of dirs) {
+                const nx = state.p.x + dx * TILE * step;
+                const ny = state.p.y + dy * TILE * step;
+                if (!collidesAt(nx, ny)) { state.p.x = nx; state.p.y = ny; fixed = true; break; }
+              }
+            }
+          }
           shift.roundActive = true;
           state.coins = 0; state.blueCoins = 0;
         }
@@ -3611,13 +3653,13 @@ addEventListener('keydown', (e) => {
     state.p.spaceHeld = true;
   }
 
-  if (e.key === 'q' || e.key === 'Q') state.p.flipGravity = (state.p.flipGravity + 1) % 4;
-  if (e.key === 'e' || e.key === 'E') state.p.flipGravity = (state.p.flipGravity + 3) % 4;
+  // Disable flip gravity keys
+  if (e.key === 'q' || e.key === 'Q' || e.key === 'e' || e.key === 'E') { e.preventDefault(); return; }
   if (e.key === 'r' || e.key === 'R') { state.p.x = 64; state.p.y = 32; state.p._speedX = state.p._speedY = 0; state.p.jumpCount = 0; }
-  if (e.key === 'l' || e.key === 'L') state.p.low_gravity = !state.p.low_gravity;
-  if (e.key === 'g' || e.key === 'G') { state.godMode = !state.godMode; state.canEdit = state.godMode; if (state.godMode) { state.auraAnim = { start: 0, playedIntro: false, loopStart: 0 }; } }
-  if (e.key === '[') state.p.maxJumps = Math.max(1, state.p.maxJumps - 1);
-  if (e.key === ']') state.p.maxJumps = Math.min(10, state.p.maxJumps + 1);
+  // Disable low-gravity toggle and god/edit mode toggle
+  if (e.key === 'l' || e.key === 'L' || e.key === 'g' || e.key === 'G') { e.preventDefault(); return; }
+  // Disable multi-jump adjustments
+  if (e.key === '[' || e.key === ']') { e.preventDefault(); return; }
   if (e.key >= '1' && e.key <= '9') state.faceIndex = (parseInt(e.key, 10) - 1);
   // Timed key toggles (simulate EE key effects): R/G/B/C/M/Y open for 5 seconds
   const keyMap = { 'r': 'red', 'g': 'green', 'b': 'blue', 'c': 'cyan', 'm': 'magenta', 'y': 'yellow', 'R': 'red', 'G': 'green', 'B': 'blue', 'C': 'cyan', 'M': 'magenta', 'Y': 'yellow' };
@@ -3841,11 +3883,11 @@ if (startCompBtn) {
 }
 
 const saveMapBtn = document.getElementById('saveMap');
-if (saveMapBtn) saveMapBtn.addEventListener('click', () => { try { saveCurrentMapToLocal(); } catch(_){} });
+if (saveMapBtn) { saveMapBtn.style.display = 'none'; saveMapBtn.disabled = true; }
 const clearMapBtn = document.getElementById('clearLocalMap');
-if (clearMapBtn) clearMapBtn.addEventListener('click', () => { try { localStorage.removeItem('EEO_LOCAL_START_MAP'); } catch(_){} });
+if (clearMapBtn) { clearMapBtn.style.display = 'none'; clearMapBtn.disabled = true; }
 const exportBtn = document.getElementById('exportEELVL');
-if (exportBtn) exportBtn.addEventListener('click', () => { try { exportWorldAsEELVL(); } catch(_){} });
+if (exportBtn) { exportBtn.style.display = 'none'; exportBtn.disabled = true; }
 
 // Mouse for editing
 const mouse = { x: 0, y: 0, tile: null, down: false, pan: false, panStartX: 0, panStartY: 0, offStartX: 0, offStartY: 0, strokeKeys: new Set(), strokeMode: 'place', strokeBrush: null, strokeLayer: 'auto' };
