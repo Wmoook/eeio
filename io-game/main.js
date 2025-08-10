@@ -1162,6 +1162,7 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       netHud.style.transform = 'translateX(-50%)';
     }
     mobile.style.display = 'block';
+    try { document.body.classList.add('is-mobile'); } catch(_) {}
     // Prevent page scroll/zoom and text selection while using mobile controls
     try {
       // Global CSS to disable touch scrolling and text selection
@@ -1180,6 +1181,73 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       document.body.style.touchAction = 'none';
       document.documentElement.style.touchAction = 'none';
     } catch(_) {}
+
+    // Responsive mobile layout and sizing
+    function layoutMobileControls(){
+      const cw = window.innerWidth || mobile.clientWidth || 640;
+      const ch = window.innerHeight || 480;
+      const portrait = ch >= cw;
+      const base = Math.min(cw, ch);
+      // Joystick size scales with viewport, clamped for usability
+      const joySize = Math.max(100, Math.min(Math.round(base * (portrait ? 0.28 : 0.22)), 220));
+      const knobSize = Math.max(48, Math.round(joySize * 0.46));
+      const gap = Math.max(6, Math.round(base * 0.012));
+      // Containers
+      const inner = mobile.firstElementChild;
+      if (inner && inner.style) {
+        inner.style.display = 'flex';
+        inner.style.justifyContent = 'space-between';
+        inner.style.alignItems = 'flex-end';
+        inner.style.gap = gap + 'px';
+      }
+      // Joystick
+      if (area && knob) {
+        area.style.width = joySize + 'px';
+        area.style.height = joySize + 'px';
+        area.style.borderRadius = '50%';
+        knob.style.width = knobSize + 'px';
+        knob.style.height = knobSize + 'px';
+      }
+      // Jump button: make it circular and sized relative to joystick
+      if (mJump) {
+        const jb = Math.max(56, Math.round(joySize * 0.6));
+        mJump.style.width = jb + 'px';
+        mJump.style.height = jb + 'px';
+        mJump.style.borderRadius = '50%';
+        mJump.style.fontSize = Math.max(12, Math.round(jb * 0.18)) + 'px';
+        mJump.style.padding = '0';
+        mJump.style.display = 'inline-flex';
+        mJump.style.alignItems = 'center';
+        mJump.style.justifyContent = 'center';
+      }
+      // Start buttons row spacing
+      if (mStart && mStartComp) {
+        const row = mStart.parentElement;
+        if (row && row.style) {
+          row.style.display = 'flex';
+          row.style.gap = gap + 'px';
+        }
+      }
+      // Bottom center connect row: push up if portrait so it doesn't overlap controls
+      try {
+        const mobRoom = document.getElementById('mobileRoom');
+        const connRow = mobRoom ? mobRoom.parentElement : null;
+        if (connRow && connRow.style) {
+          const lift = portrait ? (joySize + Math.max(40, gap * 4)) : 8;
+          connRow.style.bottom = lift + 'px';
+        }
+      } catch(_) {}
+      // Safe-area insets (iOS notch) padding
+      const padL = parseInt(getComputedStyle(document.documentElement).getPropertyValue('env(safe-area-inset-left)') || '0') || 0;
+      const padR = parseInt(getComputedStyle(document.documentElement).getPropertyValue('env(safe-area-inset-right)') || '0') || 0;
+      const padB = parseInt(getComputedStyle(document.documentElement).getPropertyValue('env(safe-area-inset-bottom)') || '0') || 0;
+      mobile.style.paddingLeft = (8 + padL) + 'px';
+      mobile.style.paddingRight = (8 + padR) + 'px';
+      mobile.style.paddingBottom = (8 + padB) + 'px';
+    }
+    layoutMobileControls();
+    try { window.addEventListener('resize', layoutMobileControls); } catch(_) {}
+    try { window.addEventListener('orientationchange', layoutMobileControls); } catch(_) {}
 
     // Wire mobile connect
     const mRoom = document.getElementById('mobileRoom');
