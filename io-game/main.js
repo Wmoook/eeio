@@ -1162,6 +1162,24 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       netHud.style.transform = 'translateX(-50%)';
     }
     mobile.style.display = 'block';
+    // Prevent page scroll/zoom and text selection while using mobile controls
+    try {
+      // Global CSS to disable touch scrolling and text selection
+      const mobileStyle = document.createElement('style');
+      mobileStyle.id = 'mobileControlFixes';
+      mobileStyle.textContent = `
+        html, body { overscroll-behavior: none; touch-action: none; -ms-touch-action: none; }
+        body { user-select: none; -webkit-user-select: none; -ms-user-select: none; }
+        #mobileControls, #joyArea, #joyKnob, #mobileJump { touch-action: none; -ms-touch-action: none; user-select: none; -webkit-user-select: none; }
+      `;
+      if (!document.getElementById('mobileControlFixes')) document.head.appendChild(mobileStyle);
+      // Also set attributes/styles directly as a fallback
+      document.body.style.userSelect = 'none';
+      document.body.style.webkitUserSelect = 'none';
+      document.body.style.msUserSelect = 'none';
+      document.body.style.touchAction = 'none';
+      document.documentElement.style.touchAction = 'none';
+    } catch(_) {}
 
     // Wire mobile connect
     const mRoom = document.getElementById('mobileRoom');
@@ -1184,14 +1202,19 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
     if (mJump) {
       const press = ()=>{ state.input.jumpJP = true; state.p.spaceHeld = true; };
       const release = ()=>{ state.p.spaceHeld = false; state.input.jump = false; };
-      mJump.addEventListener('pointerdown', (e)=>{ e.preventDefault(); press(); });
-      mJump.addEventListener('pointerup', (e)=>{ e.preventDefault(); release(); });
-      mJump.addEventListener('pointerleave', (e)=>{ e.preventDefault(); release(); });
+      mJump.style.touchAction = 'none';
+      mJump.addEventListener('pointerdown', (e)=>{ e.preventDefault(); e.stopPropagation(); press(); }, { passive: false });
+      mJump.addEventListener('pointerup', (e)=>{ e.preventDefault(); e.stopPropagation(); release(); }, { passive: false });
+      mJump.addEventListener('pointerleave', (e)=>{ e.preventDefault(); e.stopPropagation(); release(); }, { passive: false });
     }
     // Virtual joystick
     const area = document.getElementById('joyArea');
     const knob = document.getElementById('joyKnob');
     if (area && knob) {
+      // Prevent browser gestures on joystick
+      area.style.touchAction = 'none';
+      area.style.webkitUserSelect = 'none';
+      area.style.userSelect = 'none';
       const center = ()=>({ x: area.clientWidth/2, y: area.clientHeight/2 });
       const clamp = (v, m)=> Math.max(-m, Math.min(m, v));
       const updateDir = (dx, dy)=>{
@@ -1210,21 +1233,23 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       };
       let active = false;
       area.addEventListener('pointerdown', (e)=>{
+        e.preventDefault(); e.stopPropagation();
         active = true; area.setPointerCapture(e.pointerId);
         const c = center(); const rect = area.getBoundingClientRect();
         const dx = (e.clientX - rect.left) - c.x; const dy = (e.clientY - rect.top) - c.y;
         setKnob(dx, dy); updateDir(dx, dy);
-      });
+      }, { passive: false });
       area.addEventListener('pointermove', (e)=>{
+        e.preventDefault(); e.stopPropagation();
         if (!active) return;
         const c = center(); const rect = area.getBoundingClientRect();
         const dx = (e.clientX - rect.left) - c.x; const dy = (e.clientY - rect.top) - c.y;
         setKnob(dx, dy); updateDir(dx, dy);
-      });
-      const end = (e)=>{ active = false; try{ area.releasePointerCapture(e.pointerId);}catch(_){}; setKnob(0,0); updateDir(0,0); };
-      area.addEventListener('pointerup', end);
-      area.addEventListener('pointercancel', end);
-      area.addEventListener('pointerleave', end);
+      }, { passive: false });
+      const end = (e)=>{ e.preventDefault(); e.stopPropagation(); active = false; try{ area.releasePointerCapture(e.pointerId);}catch(_){}; setKnob(0,0); updateDir(0,0); };
+      area.addEventListener('pointerup', end, { passive: false });
+      area.addEventListener('pointercancel', end, { passive: false });
+      area.addEventListener('pointerleave', end, { passive: false });
     }
   } catch(_) {}
 })();
