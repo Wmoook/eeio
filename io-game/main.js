@@ -1318,6 +1318,8 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       area.addEventListener('pointerup', end, { passive: false });
       area.addEventListener('pointercancel', end, { passive: false });
       area.addEventListener('pointerleave', end, { passive: false });
+      // Ensure canvas doesn't steal pointer lock/focus away from joystick on mobile
+      try { canvas.style.touchAction = 'none'; } catch(_) {}
     }
   } catch(_) {}
 })();
@@ -3682,7 +3684,19 @@ function screenToWorld(sx, sy) {
 }
 
 // Input
+function isTypingTarget(e) {
+  try {
+    const el = e && e.target;
+    if (!el) return false;
+    const tag = (el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+    if (el.isContentEditable) return true;
+    if (typeof el.closest === 'function' && el.closest('[contenteditable="true"], input, textarea')) return true;
+  } catch(_) {}
+  return false;
+}
 function preventIfHandled(e) {
+  if (isTypingTarget(e)) return; // allow typing into inputs/fields
   const k = e.key;
   const code = e.code;
   const handledKey = k === 'ArrowLeft' || k === 'ArrowRight' || k === 'ArrowUp' || k === 'ArrowDown' ||
@@ -3706,6 +3720,7 @@ const KEYMAP = {
 };
 const pressedCodes = new Set();
 addEventListener('keydown', (e) => {
+  if (isTypingTarget(e)) return;
   preventIfHandled(e);
   if (e.repeat) return;
   pressedCodes.add(e.code);
