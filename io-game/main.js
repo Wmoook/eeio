@@ -1163,6 +1163,12 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
     }
     mobile.style.display = 'block';
     try { document.body.classList.add('is-mobile'); } catch(_) {}
+    // Pre-grab mobile UI elements used by layoutMobileControls to avoid TDZ errors
+    const mStart = document.getElementById('mobileStart');
+    const mStartComp = document.getElementById('mobileStartComp');
+    const mJump = document.getElementById('mobileJump');
+    const area = document.getElementById('joyArea');
+    const knob = document.getElementById('joyKnob');
     // Prevent page scroll/zoom and text selection while using mobile controls
     try {
       // Global CSS to disable touch scrolling and text selection
@@ -1261,12 +1267,11 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       } catch(_) {}
     });
     // Wire mobile Start / Start Comp
-    const mStart = document.getElementById('mobileStart');
-    const mStartComp = document.getElementById('mobileStartComp');
+    // mStart/mStartComp were captured above to support layout sizing
     if (mStart) mStart.addEventListener('click', ()=>{ const b = document.getElementById('startGame'); if (b) b.click(); });
     if (mStartComp) mStartComp.addEventListener('click', ()=>{ const b = document.getElementById('startCompGame'); if (b) b.click(); });
     // Wire mobile jump button -> Space
-    const mJump = document.getElementById('mobileJump');
+    // mJump captured above
     if (mJump) {
       const press = ()=>{ state.input.jumpJP = true; state.p.spaceHeld = true; };
       const release = ()=>{ state.p.spaceHeld = false; state.input.jump = false; };
@@ -1276,8 +1281,7 @@ try { window.addEventListener('orientationchange', resizeCanvas); } catch(_) {}
       mJump.addEventListener('pointerleave', (e)=>{ e.preventDefault(); e.stopPropagation(); release(); }, { passive: false });
     }
     // Virtual joystick
-    const area = document.getElementById('joyArea');
-    const knob = document.getElementById('joyKnob');
+    // area/knob captured above
     if (area && knob) {
       // Prevent browser gestures on joystick
       area.style.touchAction = 'none';
