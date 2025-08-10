@@ -1613,6 +1613,26 @@ function initNetworking(){
       shift.participantsAtRoundStart = new Set(shift.playersAlive ? Array.from(shift.playersAlive) : []);
       shift.playersAtRoundStart = shift.participantsAtRoundStart.size;
     }
+    // If host provided participants, and local is not included, force spectator state and do not move into play
+    try {
+      if (participants && Array.isArray(participants) && typeof Net !== 'undefined' && Net.id) {
+        const localId = Net.id;
+        const set = shift.participantsAtRoundStart instanceof Set ? shift.participantsAtRoundStart : new Set(participants);
+        const isParticipant = set.has(localId);
+        if (!isParticipant) {
+          // Mark eliminated for the remainder of this game
+          shift.spectateNextRound = true;
+          shift.spectatorUntilNext = true;
+          if (!shift._alreadyMovedToSpectator) {
+            state.p.x = 52 * TILE;
+            state.p.y = 77 * TILE;
+            shift._alreadyMovedToSpectator = true;
+          }
+          // Do not process GO move for spectators
+          return;
+        }
+      }
+    } catch (_) {}
     
     // If this client joined mid-round or countdown, or was eliminated, do not move or change state (unless first round is pending)
     if (shift && shift.spectatorUntilNext && !shift._pendingFirstRound) {
