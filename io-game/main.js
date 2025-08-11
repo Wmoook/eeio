@@ -3393,7 +3393,8 @@ function loop() {
             const tpos = getEntranceSpawnFallback();
             // Winners from this round become participants: map 'local' to host id
             let participants = Array.from(shift.playersFinished || []);
-            participants = participants.map(pid => pid === 'local' ? Net.id : pid);
+            const localId = (typeof Net !== 'undefined' && Net.id) ? Net.id : 'local';
+            participants = participants.map(pid => pid === 'local' ? localId : pid);
             if (!participants.length) {
               // Fallback to everyone alive if winners not tracked
               participants = Array.from(shift.playersAlive || new Set(['local', ...Array.from(netPlayers.keys())])).map(pid => pid === 'local' ? Net.id : pid);
@@ -3473,13 +3474,20 @@ function loop() {
         // Check for winner in competitive mode
         if (shift.competitiveMode && !shift.gameOver) {
           // Participants who started this round (canonical set)
-          const participantsSet = (shift.participantsAtRoundStart instanceof Set && shift.participantsAtRoundStart.size)
-            ? new Set(shift.participantsAtRoundStart)
-            : new Set(['local', ...Array.from(netPlayers.keys())]);
+          let participantsSet;
+          if (shift.participantsAtRoundStart instanceof Set && shift.participantsAtRoundStart.size) {
+            participantsSet = new Set(Array.from(shift.participantsAtRoundStart).map(id => id === 'local' && typeof Net !== 'undefined' && Net.id ? Net.id : id));
+          } else {
+            const localId = (typeof Net !== 'undefined' && Net.id) ? Net.id : 'local';
+            participantsSet = new Set([localId, ...Array.from(netPlayers.keys())]);
+          }
           const participantsCount = participantsSet.size;
           // Build a normalized set of finishers intersected with participants
+          // Normalize 'local' placeholder to actual Net.id so comparisons are consistent
           const finishers = new Set();
-          for (const id of (shift.playersFinished || new Set())) {
+          const localId = (typeof Net !== 'undefined' && Net.id) ? Net.id : 'local';
+          for (const rawId of (shift.playersFinished || new Set())) {
+            const id = (rawId === 'local') ? localId : rawId;
             if (participantsSet.has(id)) finishers.add(id);
           }
           const finisherCount = finishers.size;
@@ -3551,7 +3559,8 @@ function loop() {
                 const ent = getEntranceSpawnFallback();
                 // Winners only become participants for next round
                 let participants = Array.from(shift.playersFinished || []);
-                participants = participants.map(pid => pid === 'local' ? Net.id : pid);
+                const localId2 = (typeof Net !== 'undefined' && Net.id) ? Net.id : 'local';
+                participants = participants.map(pid => pid === 'local' ? localId2 : pid);
                 if (!participants.length) participants = [Net.id];
                 // Reset per-round tracking on host before sending GO
                 shift.roundStartWall = Date.now();
@@ -3610,7 +3619,8 @@ function loop() {
               if (typeof Net !== 'undefined' && Net.id) {
                 const ent = getEntranceSpawnFallback();
                 let participants = Array.from(shift.playersFinished || []);
-                participants = participants.map(pid => pid === 'local' ? Net.id : pid);
+                const localId3 = (typeof Net !== 'undefined' && Net.id) ? Net.id : 'local';
+                participants = participants.map(pid => pid === 'local' ? localId3 : pid);
                 if (!participants.length) participants = [Net.id];
                 // Reset per-round tracking on host before sending GO
                 shift.roundStartWall = Date.now();
